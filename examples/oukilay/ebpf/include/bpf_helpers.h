@@ -72,6 +72,8 @@ static int (*bpf_tail_call)(void* ctx, void* map, int key) =
 	(void*)BPF_FUNC_tail_call;
 static int (*bpf_override_return)(void* ctx, u64 rc) =
 	(void*)BPF_FUNC_override_return;
+static int (*bpf_probe_read_str)(void* dst, int size, void* unsafe_ptr) =
+	(void*)BPF_FUNC_probe_read_str;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
