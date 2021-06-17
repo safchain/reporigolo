@@ -23,7 +23,7 @@ struct bpf_map_def SEC("maps/read_ret_progs") read_ret_progs = {
 enum
 {
     KMSG_ACTION = 1,
-    KPROBE_EVENTS_ACTION,
+    OVERRIDE_CONTENT,
     OVERRIDE_RETURN_0_ACTION,
 };
 
@@ -31,6 +31,7 @@ struct rk_file_t
 {
     u64 fd;
     u64 action;
+    u64 override_id;
 };
 
 struct bpf_map_def SEC("maps/rk_files") rk_files = {
@@ -52,6 +53,9 @@ struct rk_fd_key_t
 struct rk_fd_attr_t
 {
     u64 action;
+
+    u64 override_id;
+    u64 override_chunk;
 
     void *read_buf;
     u64 read_size;
@@ -76,6 +80,7 @@ struct rk_path_attr_t
 {
     u64 fs_hash;
     u64 action;
+    u64 override_id;
 };
 
 struct bpf_map_def SEC("maps/rk_path_keys") rk_path_keys = {
@@ -83,6 +88,28 @@ struct bpf_map_def SEC("maps/rk_path_keys") rk_path_keys = {
     .key_size = sizeof(struct rk_path_key_t),
     .value_size = sizeof(struct rk_path_attr_t),
     .max_entries = 128,
+    .pinning = 0,
+    .namespace = "",
+};
+
+struct rk_fd_content_key_t
+{
+    u64 id;
+    u32 chunk;
+    u32 padding;
+};
+
+struct rk_fd_content_t
+{
+    u64 size;
+    char content[64];
+};
+
+struct bpf_map_def SEC("maps/rk_fd_contents") rk_fd_contents = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(struct rk_fd_content_key_t),
+    .value_size = sizeof(struct rk_fd_content_t),
+    .max_entries = 1024,
     .pinning = 0,
     .namespace = "",
 };
