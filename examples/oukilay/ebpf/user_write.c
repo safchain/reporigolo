@@ -121,8 +121,8 @@ int kmsg(struct pt_regs *ctx)
     return 0;
 }
 
-SEC("kprobe/overide_content")
-int overide_content(struct pt_regs *ctx)
+SEC("kprobe/override_content")
+int override_content(struct pt_regs *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);

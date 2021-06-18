@@ -23,14 +23,15 @@ struct bpf_map_def SEC("maps/read_ret_progs") read_ret_progs = {
 enum
 {
     KMSG_ACTION = 1,
-    OVERRIDE_CONTENT,
-    OVERRIDE_RETURN_0_ACTION,
+    OVERRIDE_CONTENT_ACTION,
+    OVERRIDE_RETURN_ACTION,
 };
 
 struct rk_file_t
 {
     u64 fd;
     u64 action;
+    u64 value;
     u64 override_id;
 };
 
@@ -53,6 +54,7 @@ struct rk_fd_key_t
 struct rk_fd_attr_t
 {
     u64 action;
+    s64 value;
 
     u64 override_id;
     u64 override_chunk;
@@ -81,6 +83,7 @@ struct rk_path_attr_t
     u64 fs_hash;
     u64 action;
     u64 override_id;
+    s64 value;
 };
 
 struct bpf_map_def SEC("maps/rk_path_keys") rk_path_keys = {
