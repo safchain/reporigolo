@@ -41,10 +41,10 @@ build-ebpf:
 		-isystem /usr/src/linux-headers-$$(uname -r)/arch/x86/include \
 		-isystem /usr/src/linux-headers-$$(uname -r)/arch/x86/include/uapi \
 		-isystem /usr/src/linux-headers-$$(uname -r)/arch/x86/include/generated \
-		ebpf/user_write.c \
-		-c -o - | llc -march=bpf -filetype=obj -o ebpf/bin/user_write.o
+		ebpf/override_user.c \
+		-c -o - | llc -march=bpf -filetype=obj -o ebpf/bin/override_user.o
 
-	go-bindata -pkg main -prefix "ebpf/bin" -o "probe.go" "ebpf/bin/main.o" "ebpf/bin/user_write.o"
+	go-bindata -pkg build -prefix "ebpf/bin" -o "ebpf/build/probe.go" "ebpf/bin/main.o" "ebpf/bin/override_user.o"
 
 build:
 	go build -o bin/main .

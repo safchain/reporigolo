@@ -8,6 +8,7 @@ require (
 	github.com/iovisor/gobpf v0.0.0-20200417061255-f0a208deaea5 // indirect
 	github.com/jteeuwen/go-bindata v3.0.7+incompatible // indirect
 	github.com/kevinburke/go-bindata v3.22.0+incompatible // indirect
+	github.com/mattn/go-zglob v0.0.3
 	github.com/pkg/errors v0.9.1
 	github.com/shuLhan/go-bindata v4.0.0+incompatible // indirect
 	github.com/sirupsen/logrus v1.6.0
