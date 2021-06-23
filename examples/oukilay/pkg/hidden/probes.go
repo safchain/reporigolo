@@ -5,6 +5,9 @@ import "github.com/DataDog/ebpf/manager"
 var (
 	MainProbes = []*manager.Probe{
 		{
+			Section: "kprobe/__x64_sys_finit_module",
+		},
+		{
 			Section: "kprobe/__x64_sys_kill",
 		},
 		{
