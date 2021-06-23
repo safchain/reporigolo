@@ -10,6 +10,8 @@
 #include "common.h"
 #include "hash.h"
 
+//#include "lib.h"
+
 #include "override_dir_kern.h"
 #include "override_cnt_kern.h"
 
@@ -44,7 +46,9 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
     char name[MAX_SEGMENT_LENGTH + 1];
     int end = 0;
 
-    struct rk_path_key_t key = {};
+    struct rk_path_key_t key = {
+        .hash = FNV_BASIS,
+    };
 
 #pragma unroll
     for (int i = 0; i < 15; i++)
@@ -67,21 +71,23 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
         }
 
         key.hash = FNV_BASIS;
-        key.pos = i;
-
         update_hash_str(&key.hash, name);
 
-        struct rk_path_attr_t *path_attr = bpf_map_lookup_elem(&rk_path_keys, &key);
+        struct rk_path_attr_t *path_attr = bpf_map_lookup_elem(&rk_path_attrs, &key);
         if (!path_attr)
         {
-            return 0;
+            key.pos = 0;
         }
-        else if (path_attr->action.id)
+        else
         {
-            if (!path_attr->fs_hash || path_attr->fs_hash == get_fs_hash(dentry))
+            if (path_attr->action.id)
             {
-                return path_attr;
+                if (!path_attr->fs_hash || path_attr->fs_hash == get_fs_hash(dentry))
+                {
+                    return path_attr;
+                }
             }
+            key.pos++;
         }
 
         if (end)
@@ -95,8 +101,7 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
     return 0;
 }
 
-SEC("kprobe/vfs_open")
-int _vfs_open(struct pt_regs *ctx)
+static __attribute__((always_inline)) int access_path(struct path *path)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
 
@@ -107,8 +112,6 @@ int _vfs_open(struct pt_regs *ctx)
     {
         return 0;
     }
-
-    struct path *path = (struct path *)PT_REGS_PARM1(ctx);
 
     struct dentry *dentry;
     bpf_probe_read(&dentry, sizeof(dentry), &path->dentry);
@@ -127,8 +130,21 @@ int _vfs_open(struct pt_regs *ctx)
     return 0;
 }
 
-SEC("kretprobe/__x64_sys_openat")
-int __x64_sys_openat_ret(struct pt_regs *ctx)
+SEC("kprobe/vfs_open")
+int _vfs_open(struct pt_regs *ctx)
+{
+    struct path *path = (struct path *)PT_REGS_PARM1(ctx);
+    return access_path(path);
+}
+
+SEC("kprobe/vfs_getattr")
+int _vfs_getattr(struct pt_regs *ctx)
+{
+    struct path *path = (struct path *)PT_REGS_PARM1(ctx);
+    return access_path(path);
+}
+
+static __attribute__((always_inline)) int path_accessed(struct pt_regs *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
@@ -148,13 +164,43 @@ int __x64_sys_openat_ret(struct pt_regs *ctx)
     };
     bpf_map_update_elem(&rk_fd_attrs, &fd_key, &fd_attr, BPF_ANY);
 
-     if (fd_attr.action.id == OVERRIDE_RETURN_ACTION)
+    if (fd_attr.action.id & OVERRIDE_RETURN_ACTION)
     {
         bpf_override_return(ctx, fd_attr.action.return_value);
         return 0;
     }
 
     return 0;
+}
+
+SEC("kretprobe/__x64_sys_openat")
+int __x64_sys_openat_ret(struct pt_regs *ctx)
+{
+    return path_accessed(ctx);
+}
+
+SEC("kretprobe/__x64_sys_stat")
+int __x64_sys_stat_ret(struct pt_regs *ctx)
+{
+    return path_accessed(ctx);
+}
+
+SEC("kretprobe/__x64_sys_lstat")
+int __x64_sys_lstat_ret(struct pt_regs *ctx)
+{
+    return path_accessed(ctx);
+}
+
+SEC("kretprobe/__x64_sys_newlstat")
+int __x64_sys_newlstat_ret(struct pt_regs *ctx)
+{
+    return path_accessed(ctx);
+}
+
+SEC("kretprobe/__x64_sys_fstat")
+int __x64_sys_fstat_ret(struct pt_regs *ctx)
+{
+    return path_accessed(ctx);
 }
 
 SEC("kprobe/__x64_sys_close")
@@ -202,7 +248,7 @@ int kprobe_sys_read(struct pt_regs *ctx)
         return 0;
     }
 
-    if (fd_attr->action.id == OVERRIDE_RETURN_ACTION)
+    if (fd_attr->action.id & OVERRIDE_RETURN_ACTION)
     {
         bpf_override_return(ctx, fd_attr->action.return_value);
         return 0;
@@ -271,7 +317,7 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
         return 0;
     }
 
-    if (fd_attr->action.id == OVERRIDE_CONTENT_ACTION)
+    if (fd_attr->action.id & OVERRIDE_CONTENT_ACTION)
     {
         override_content(ctx, fd_attr);
     }

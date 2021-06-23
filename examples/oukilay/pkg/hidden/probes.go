@@ -8,6 +8,18 @@ var (
 			Section: "kretprobe/__x64_sys_openat",
 		},
 		{
+			Section: "kretprobe/__x64_sys_stat",
+		},
+		{
+			Section: "kretprobe/__x64_sys_lstat",
+		},
+		{
+			Section: "kretprobe/__x64_sys_newlstat",
+		},
+		{
+			Section: "kretprobe/__x64_sys_fstat",
+		},
+		{
 			Section: "kprobe/__x64_sys_read",
 		},
 		{
@@ -15,6 +27,9 @@ var (
 		},
 		{
 			Section: "kprobe/vfs_open",
+		},
+		{
+			Section: "kprobe/vfs_getattr",
 		},
 		{
 			Section: "kretprobe/vfs_read",

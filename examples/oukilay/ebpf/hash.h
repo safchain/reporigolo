@@ -1,6 +1,8 @@
 #ifndef __HASH_H
 #define __HASH_H
 
+#include "defs.h"
+
 // Fowler/Noll/Vo hash
 #define FNV_BASIS ((__u64)14695981039346656037U)
 #define FNV_PRIME ((__u64)1099511628211U)

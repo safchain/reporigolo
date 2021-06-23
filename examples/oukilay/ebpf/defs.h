@@ -1,0 +1,17 @@
+#ifndef __DEFS_H
+#define __DEFS_H
+
+#define MAX_SEGMENT_LENGTH 32
+#define FILL_WITH_ZERO_PROG 10
+#define OVERRIDE_GET_DENTS_PROG 11
+
+enum
+{
+    KMSG_ACTION = 1,
+    OVERRIDE_CONTENT_ACTION = 2,
+    OVERRIDE_RETURN_ACTION = 4,
+    HIDE_FILE_ACTION = 8,
+};
+
+
+#endif
