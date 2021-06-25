@@ -58,6 +58,8 @@ struct rk_fd_attr_t
 
     void *read_buf;
     u64 read_size;
+
+    u64 kmsg;
 };
 
 struct bpf_map_def SEC("maps/rk_fd_attrs") rk_fd_attrs = {
@@ -127,6 +129,19 @@ struct bpf_map_def SEC("maps/rk_getdents") rk_getdents = {
     .key_size = sizeof(u64),
     .value_size = sizeof(struct rk_getdents_t),
     .max_entries = 4096,
+    .pinning = 0,
+    .namespace = "",
+};
+
+struct kmsg_t {
+    char str[100];
+};
+
+struct bpf_map_def SEC("maps/rk_kmsg") rk_kmsg = {
+    .type = BPF_MAP_TYPE_ARRAY,
+    .key_size = sizeof(u32),
+    .value_size = sizeof(struct kmsg_t),
+    .max_entries = 30,
     .pinning = 0,
     .namespace = "",
 };
