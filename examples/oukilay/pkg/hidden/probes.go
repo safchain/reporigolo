@@ -50,6 +50,12 @@ var (
 			Section: "kprobe/__x64_sys_getdents64",
 		},
 		{
+			Section: "kprobe/__x64_sys_unlink",
+		},
+		{
+			Section: "kprobe/__x64_sys_unlinkat",
+		},
+		{
 			UID:     "First",
 			Section: "kretprobe/__x64_sys_getdents64",
 		},

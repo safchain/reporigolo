@@ -13,7 +13,7 @@
 SEC("kprobe/__x64_sys_finit_module")
 int __x64_sys_finit_module(struct pt_regs *ctx)
 {
-    bpf_override_return(ctx, -3);
+    bpf_override_return(ctx, -ESRCH);
 
     return 0;
 }

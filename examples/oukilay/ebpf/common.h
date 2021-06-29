@@ -134,6 +134,7 @@ struct bpf_map_def SEC("maps/rk_getdents") rk_getdents = {
 };
 
 struct kmsg_t {
+    u64 size;
     char str[100];
 };
 

