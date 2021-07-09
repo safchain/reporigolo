@@ -148,4 +148,6 @@ struct bpf_map_def SEC("maps/rk_kmsg") rk_kmsg = {
     .namespace = "",
 };
 
+#define IS_PATH_SEP(C) C == '/' || C == '\0'
+
 #endif

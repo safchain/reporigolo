@@ -22,9 +22,7 @@ void __attribute__((always_inline)) update_hash_str(__u64 *hash, const char *str
     for (int i = 0; i != MAX_SEGMENT_LENGTH; i++)
     {
         if (str[i] == '\0')
-        {
             break;
-        }
         update_hash_byte(hash, str[i]);
     }
 }

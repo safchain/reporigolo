@@ -23,13 +23,9 @@ void __attribute__((always_inline)) override_content(struct pt_regs *ctx, struct
 
     struct rk_fd_content_t *fd_content = (struct rk_fd_content_t *)bpf_map_lookup_elem(&rk_fd_contents, &fd_content_key);
     if (fd_content)
-    {
         bpf_override_return(ctx, fd_content->size);
-    }
     else
-    {
         bpf_override_return(ctx, 0);
-    }
 
     fd_attr->override_chunk++;
 }

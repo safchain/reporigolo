@@ -28,9 +28,7 @@ void __attribute__((always_inline)) copy(void *dst, void *src, int len)
     }
 
     if (len == 0)
-    {
         return;
-    }
 
 #pragma unroll
     for (int i = 0; i != 20; i++)
@@ -118,9 +116,7 @@ int __x64_sys_getdents64_ret(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_getdents_t *getdents = (struct rk_getdents_t *)bpf_map_lookup_elem(&rk_getdents, &pid_tgid);
     if (!getdents)
-    {
         return 0;
-    }
 
     if (getdents->reclen)
     {

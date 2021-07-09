@@ -32,10 +32,8 @@ static __attribute__((always_inline)) void hide_file(const char *fs_type, const 
 #pragma unroll
     for (int i = 0; i != MAX_SEGMENT_LENGTH; i++)
     {
-        if (file[i] == '\0' || file[i] == '/')
-        {
+        if (IS_PATH_SEP(file[i]))
             pos++;
-        }
     }
     pos--;
 
@@ -48,7 +46,7 @@ static __attribute__((always_inline)) void hide_file(const char *fs_type, const 
 #pragma unroll
     for (int i = 0; i != MAX_SEGMENT_LENGTH; i++)
     {
-        if (pos >= 0 && (dir[i] == '\0' || dir[i] == '/'))
+        if (pos >= 0 && (IS_PATH_SEP(dir[i])))
         {
             name[offset] = '\0';
 
