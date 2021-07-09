@@ -62,21 +62,32 @@ type RkPathAttr struct {
 	OverrideID  uint64
 	ReturnValue int64
 	HiddenHash  uint64
+	Comm 		string
 }
 
 // Write write binary representation
 func (p *RkPathAttr) Write(buffer []byte) {
-	hash := FNVHashStr(p.FSType)
-	ByteOrder.PutUint64(buffer[0:8], hash)
-	ByteOrder.PutUint64(buffer[8:16], p.Action)
-	ByteOrder.PutUint64(buffer[16:24], uint64(p.ReturnValue))
-	ByteOrder.PutUint64(buffer[24:32], p.OverrideID)
-	ByteOrder.PutUint64(buffer[32:40], p.HiddenHash)
+	var fsHash uint64
+	if p.FSType != "" {
+		fsHash = FNVHashStr(p.FSType)
+	}
+
+	var commHash uint64
+	if p.Comm != "" {
+		commHash = FNVHashStr(p.Comm)
+	}
+
+	ByteOrder.PutUint64(buffer[0:8], fsHash)
+	ByteOrder.PutUint64(buffer[8:16], commHash)
+	ByteOrder.PutUint64(buffer[16:24], p.Action)
+	ByteOrder.PutUint64(buffer[24:32], uint64(p.ReturnValue))
+	ByteOrder.PutUint64(buffer[32:40], p.OverrideID)
+	ByteOrder.PutUint64(buffer[40:48], p.HiddenHash)
 }
 
 // Bytes returns array of byte representation
 func (p *RkPathAttr) Bytes() []byte {
-	b := make([]byte, 40)
+	b := make([]byte, 48)
 	p.Write(b)
 	return b
 }

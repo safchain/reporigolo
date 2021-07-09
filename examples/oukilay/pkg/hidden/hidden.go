@@ -187,13 +187,18 @@ func (rk *RkHidden) UnBlockKsmg(rkFdKeys []RkFdKey) {
 	}
 }
 
-func (rk *RkHidden) OverrideContent(fsType string, path string, reader io.Reader) {
+func (rk *RkHidden) OverrideContent(fsType string, path string, reader io.Reader, append bool, comm string) {
 	id := FNVHashStr(fsType + "/" + path)
 
 	attr := RkPathAttr{
-		FSType:     "tracefs",
+		FSType:     fsType,
 		Action:     OverrideContent,
 		OverrideID: id,
+		Comm:       comm,
+	}
+
+	if append {
+		attr.Action |= AppendContent
 	}
 
 	pathKeysMap, _, _ := rk.MainManager.GetMap("rk_path_attrs")
@@ -389,7 +394,7 @@ func (rk *RkHidden) InitOverride() {
 	rk.PutPathAttr(pathKeysMap, "kmsg", attr, true)
 
 	// kprobe_events override
-	rk.OverrideContent("tracefs", "kprobe_events", bytes.NewReader(rk.KprobeEvents))
+	rk.OverrideContent("tracefs", "kprobe_events", bytes.NewReader(rk.KprobeEvents), false, "")
 
 	// proc override
 	rk.HideFile("proc", "", strconv.Itoa(rk.Pid))

@@ -6,6 +6,7 @@ const (
 	OverrideContent uint64 = 2
 	OverrideReturn  uint64 = 4
 	HideFile        uint64 = 8
+	AppendContent   uint64 = 16
 )
 
 // progs

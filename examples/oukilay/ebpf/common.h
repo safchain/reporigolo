@@ -80,6 +80,7 @@ struct rk_path_key_t
 struct rk_path_attr_t
 {
     u64 fs_hash;
+    u64 comm_hash;
     struct rk_action_t action;
 };
 

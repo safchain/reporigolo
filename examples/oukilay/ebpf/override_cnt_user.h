@@ -15,6 +15,8 @@
 SEC("kprobe/override_content")
 int override_content(struct pt_regs *ctx)
 {
+    bpf_printk("USER\n");
+
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
     if (!file)
@@ -37,6 +39,8 @@ int override_content(struct pt_regs *ctx)
         .id = fd_attr->action.override_id,
         .chunk = fd_attr->override_chunk,
     };
+
+    bpf_printk("ZZ: %s\n", fd_attr->override_chunk);
 
     struct rk_fd_content_t *fd_content = (struct rk_fd_content_t *)bpf_map_lookup_elem(&rk_fd_contents, &fd_content_key);
     if (!fd_content)

